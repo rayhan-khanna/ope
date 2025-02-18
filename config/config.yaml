@@ -1,0 +1,21 @@
+bandit:
+  n_actions: 10
+  dim_context: 5
+  reward_type: binary
+  reward_function: logistic_reward_function
+
+evaluation:
+  n_rounds_train: 10000
+  n_rounds_test: 10000
+  n_rounds_list: [1000, 5000, 10000, 20000, 50000]
+  n_bootstrap_samples: 1000
+
+ope:
+  estimators: 
+    - DM
+    - IPS
+    - DR
+    - MIPS
+    # - IS
+  policy:
+    - random
