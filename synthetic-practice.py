@@ -35,21 +35,36 @@ def run_ope(seed, dataset, n_rounds_list, n_actions, cfg):
 
         # Apply softmax 
         action_dist = np.exp(action_scores) / np.sum(np.exp(action_scores), axis=1, keepdims=True)
-
         action_dist = action_dist.reshape(n_rounds, n_actions, 1)
 
-        estimator_map = {"DM": DirectMethod(), "IPS": InverseProbabilityWeighting(), "DR": DoublyRobust(), "MIPS": SwitchDoublyRobust()}
+        estimator_map = {
+            "DM": DirectMethod(),
+            "IPS": InverseProbabilityWeighting(),
+            "DR": DoublyRobust(),
+            "MIPS": SwitchDoublyRobust(),
+            "IS": ImportanceSamplingEstimator(  # Custom estimator 
+                behavior_policy_probs=bandit_feedback["pscore"],  
+                target_policy_probs=action_dist[np.arange(n_rounds), bandit_feedback["action"]],
+                rewards=bandit_feedback["reward"]
+            )
+        }
+
         selected_estimators = {name: estimator_map[name] for name in cfg.ope.estimators}
 
         mse_scores = {}
+
         for name, estimator in selected_estimators.items():
-            estimate = estimator.estimate_policy_value(
-                reward=bandit_feedback["reward"],
-                action=bandit_feedback["action"],
-                pscore=bandit_feedback["pscore"],
-                action_dist=action_dist,
-                estimated_rewards_by_reg_model=estimated_rewards_by_reg_model
-            )
+            if name == "IS":  
+                estimate = estimator.estimate_policy_value()
+            else: 
+                estimate = estimator.estimate_policy_value(
+                    reward=bandit_feedback["reward"],
+                    action=bandit_feedback["action"],
+                    pscore=bandit_feedback["pscore"],
+                    action_dist=action_dist,
+                    estimated_rewards_by_reg_model=estimated_rewards_by_reg_model
+                )
+        
             mse = np.mean((estimate - bandit_feedback["expected_reward"].mean()) ** 2)
             mse_scores[name] = mse
 
@@ -68,7 +83,7 @@ def plot_results(df_mse_avg, df_mse_std, n_rounds_list):
     plt.legend()
     plt.grid(True)
     plt.show()
-    
+
 @hydra.main(config_path="config", config_name="config", version_base=None)
 def main(cfg: DictConfig):
     n_actions = cfg.bandit.n_actions

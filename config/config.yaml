@@ -16,6 +16,6 @@ ope:
     - IPS
     - DR
     - MIPS
-    # - IS
+    - IS
   policy:
     - random
