@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from synthetic_bandit_dataset import CustomSyntheticBanditDataset
 from action_policies import EpsilonGreedyPolicy
+import torch.optim as optim
 
 # candidate selection
 class TwoTowerFirstStagePolicy(nn.Module):
@@ -129,12 +130,13 @@ def ma_et_al_loss(model_stage1, model_stage2, x, a_taken, pi0_probs, r, candidat
 # Experiment testing/results
 #
 
-device = "cuda" if torch.cuda.is_available() else "cpu"
+# device = "cuda" if torch.cuda.is_available() else "cpu" # not needed since running on mac locally
+device = "cpu"
 
 # synthetic dataset
 policy = EpsilonGreedyPolicy(epsilon=0.1, random_state=42)
 dataset = CustomSyntheticBanditDataset(
-    n_actions=10000, 
+    n_actions=500, 
     dim_context=10, 
     top_k=5, 
     action_policy=policy, 
@@ -146,34 +148,65 @@ n_samples = 100
 bandit_feedback = dataset.obtain_batch_bandit_feedback(n_samples)
 
 # print bandit feedback (first two examples)
-print("Bandit Feedback (first two examples):")
-for key, value in bandit_feedback.items():
-    if isinstance(value, torch.Tensor):
-        print(f"{key}: {value[:2].cpu().numpy()}")
-    else:
-        print(f"{key}: {value}")
+# print("Bandit Feedback (first two examples):")
+# for key, value in bandit_feedback.items():
+#     if isinstance(value, torch.Tensor):
+#         print(f"{key}: {value[:2].cpu().numpy()}")
+#     else:
+#         print(f"{key}: {value}")
 
 dim_context = dataset.dim_context
 num_items = dataset.n_actions
 emb_dim = 32
 top_k = dataset.top_k
 
-first_stage = TwoTowerFirstStagePolicy(dim_context, num_items, emb_dim, top_k).to(device)
-second_stage = SoftmaxSecondStagePolicy(dim_context, emb_dim, first_stage).to(device)
-
 # get data
 x = bandit_feedback["context"]
 a_taken = bandit_feedback["action"]
 r = bandit_feedback["reward"]
 pi0_probs = bandit_feedback["pscore"]
+candidates = bandit_feedback["candidates"]
 
-# run loss tests
-print("Losses:")
-mse = mse_loss(first_stage, x, a_taken, r)
-print(f"MSE Loss: {mse.item():.4f}")
+first_stage_model = TwoTowerFirstStagePolicy(dim_context, num_items, emb_dim, top_k).to(device)
+second_stage_model = SoftmaxSecondStagePolicy(dim_context, emb_dim, first_stage_model).to(device)
+optimizer = optim.Adam(second_stage_model.parameters())
+num_epochs = 100
 
-opl = opl_loss(first_stage, x, a_taken, pi0_probs, r)
-print(f"OPL Loss: {opl.item():.4f}")
+print("MSE Loss")
+for epoch in range(num_epochs):
+    optimizer.zero_grad()
+    loss = mse_loss(first_stage_model, x, a_taken, r)
+    loss.backward()
+    optimizer.step()
+    if epoch % 10 == 0:
+        print(f'Epoch [{epoch+1}/{num_epochs}], Loss: {loss.item():.4f}')
 
-ma_loss = ma_et_al_loss(first_stage, second_stage, x, a_taken, pi0_probs, r, bandit_feedback["candidates"])
-print(f"Ma et al. Loss: {ma_loss.item():.4f}")
+print("OPL Loss")
+for epoch in range(num_epochs):
+    optimizer.zero_grad()
+    loss = opl_loss(first_stage_model, x, a_taken, pi0_probs, r)
+    loss.backward()
+    optimizer.step()
+    if epoch % 10 == 0:
+        print(f'Epoch [{epoch+1}/{num_epochs}], Loss: {loss.item():.4f}')
+
+print("Ma Et. Al Loss")
+for epoch in range(num_epochs):
+    probs = second_stage_model(x, candidates)
+    optimizer.zero_grad()
+    loss = ma_et_al_loss(first_stage_model, second_stage_model, x, a_taken, pi0_probs, r, candidates)
+    loss.backward()
+    optimizer.step()
+    if epoch % 10 == 0:
+        print(f'Epoch [{epoch+1}/{num_epochs}], Loss: {loss.item():.4f}')
+
+# run loss tests -- used for initial debugging, now implemented full training loop 
+# print("Losses:")
+# mse = mse_loss(first_stage, x, a_taken, r)
+# print(f"MSE Loss: {mse.item():.4f}")
+
+# opl = opl_loss(first_stage, x, a_taken, pi0_probs, r)
+# print(f"OPL Loss: {opl.item():.4f}")
+
+# ma_loss = ma_et_al_loss(first_stage, second_stage, x, a_taken, pi0_probs, r, bandit_feedback["candidates"])
+# print(f"Ma et al. Loss: {ma_loss.item():.4f}")
