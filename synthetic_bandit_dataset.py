@@ -106,19 +106,3 @@ class CustomSyntheticBanditDataset:
             "pi_b": pi_b,
             "pscore": chosen_prob, 
         }
-
-device = "cuda" if torch.cuda.is_available() else "cpu"
-policy = EpsilonGreedyPolicy(epsilon=0.1, random_state=42)
-dataset = CustomSyntheticBanditDataset(n_actions=10000, dim_context=10, top_k=5, action_policy=policy, device=device)
-
-# generate bandit feedback data
-n_samples = 5
-bandit_feedback = dataset.obtain_batch_bandit_feedback(n_samples)
-
-# print first 2 values to see output
-print("Bandit Feedback")
-for key, value in bandit_feedback.items():
-    if isinstance(value, torch.Tensor):
-        print(f"{key}: {value[:2].cpu().numpy()}")  # numpy for readability
-    else:
-        print(f"{key}: {value}")
