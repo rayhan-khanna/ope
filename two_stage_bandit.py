@@ -169,7 +169,7 @@ candidates = bandit_feedback["candidates"]
 
 first_stage_model = TwoTowerFirstStagePolicy(dim_context, num_items, emb_dim, top_k).to(device)
 second_stage_model = SoftmaxSecondStagePolicy(dim_context, emb_dim, first_stage_model).to(device)
-optimizer = optim.Adam(second_stage_model.parameters())
+optimizer = optim.Adam(first_stage_model.parameters())
 num_epochs = 100
 
 print("MSE Loss")
@@ -190,9 +190,8 @@ for epoch in range(num_epochs):
     if epoch % 10 == 0:
         print(f'Epoch [{epoch+1}/{num_epochs}], Loss: {loss.item():.4f}')
 
-print("Ma Et. Al Loss")
+print("Ma Et Al. Loss")
 for epoch in range(num_epochs):
-    probs = second_stage_model(x, candidates)
     optimizer.zero_grad()
     loss = ma_et_al_loss(first_stage_model, second_stage_model, x, a_taken, pi0_probs, r, candidates)
     loss.backward()
