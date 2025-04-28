@@ -103,3 +103,50 @@ class DirectMethodEstimator(BaseOffPolicyEstimator):
         upper_bound = torch.quantile(bootstrap_estimates, 0.975).item()
 
         return {"lower_bound": lower_bound, "upper_bound": upper_bound}
+    
+class DoublyRobustEstimator(BaseOffPolicyEstimator):
+    def __init__(self, reward_model, context, actions, 
+                 behavior_pscore, target_pscore, rewards):
+        """
+        reward_model: model that predicts expected reward given x, a 
+        context: contexts (x_i's)
+        actions: logged actions
+        behavior_pscore: prob under behavior (logging) policy
+        target_pscore: prob under target policy
+        rewards: observed rewards
+        """
+        self.reward_model = reward_model
+        self.context = context
+        self.behavior_pscore = behavior_pscore
+        self.target_pscore = target_pscore
+        self.rewards = rewards
+        self.actions = actions
+
+    def _estimate_dr_rewards(self) -> torch.Tensor:
+        q_r_pred = self.reward_model.predict(self.context, self.actions)
+        weights = self.target_pscore / self.behavior_pscore
+        dr_reward = q_r_pred + weights * (self.rewards - q_r_pred)
+        return dr_reward
+
+    def estimate_policy_value(self) -> float:
+        dr_reward = self._estimate_dr_rewards()
+        return dr_reward.mean().item()
+
+    def estimate_policy_value_tensor(self) -> torch.Tensor:
+        dr_reward = self._estimate_dr_rewards()
+        return dr_reward.mean()
+
+    def estimate_interval(self, n_bootstrap: int = 1000) -> Dict[str, float]:
+        dr_rewards = self._estimate_dr_rewards()
+        n = len(dr_rewards)
+        bootstrap_estimates = torch.zeros(n_bootstrap)
+
+        for i in range(n_bootstrap):
+            indices = torch.randint(0, n, (n,))
+            sampled_dr = dr_rewards[indices]
+            bootstrap_estimates[i] = sampled_dr.mean()
+
+        lower_bound = torch.quantile(bootstrap_estimates, 0.025).item()
+        upper_bound = torch.quantile(bootstrap_estimates, 0.975).item()
+
+        return {"lower_bound": lower_bound, "upper_bound": upper_bound}
