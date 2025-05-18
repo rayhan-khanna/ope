@@ -82,9 +82,11 @@ class DoublyRobustEstimator(BaseOffPolicyEstimator):
         self.actions = actions
 
     def _estimate_dr_rewards(self) -> torch.Tensor:
-        q_r_pred = self.reward_model.predict(self.context, self.actions)
+        target_actions = self.target_policy.sample_action(self.context)
+        q_target = self.reward_model.predict(self.context, target_actions)
+        q_logged = self.reward_model.predict(self.context, self.actions)
         weights = self.target_pscore / self.behavior_pscore
-        dr_reward = q_r_pred + weights * (self.rewards - q_r_pred)
+        dr_reward = q_target + weights * (self.rewards - q_logged)
         return dr_reward
 
     def estimate_policy_value(self) -> float:
