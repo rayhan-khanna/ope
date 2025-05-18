@@ -14,11 +14,6 @@ class BaseOffPolicyEstimator(ABC):
     def estimate_policy_value_tensor(self) -> torch.Tensor:
         """Estimate the expected reward of the target policy."""
         pass
-
-    @abstractmethod
-    def estimate_interval(self, n_bootstrap: int = 1000) -> Dict[str, float]:
-        """Estimate the 95% confidence interval for the policy value."""
-        pass
     
 class ImportanceSamplingEstimator(BaseOffPolicyEstimator):
     def __init__(self, behavior_pscore: torch.Tensor, target_pscore: torch.Tensor, rewards: torch.Tensor):
@@ -44,24 +39,6 @@ class ImportanceSamplingEstimator(BaseOffPolicyEstimator):
         weighted_rewards = self._estimate_round_rewards()
         return weighted_rewards.mean()
 
-    def estimate_interval(self, n_bootstrap: int = 1000) -> Dict[str, float]:
-        n = len(self.rewards)
-        bootstrap_estimates = torch.zeros(n_bootstrap, device=self.rewards.device)
-
-        for i in range(n_bootstrap):
-            indices = torch.randint(0, n, (n,), device=self.rewards.device)
-            sampled_rewards = self.rewards[indices]
-            sampled_behavior = self.behavior_pscore[indices]
-            sampled_target = self.target_pscore[indices]
-
-            weights = sampled_target / sampled_behavior
-            bootstrap_estimates[i] = (sampled_rewards * weights).mean()
-
-        lower_bound = torch.quantile(bootstrap_estimates, 0.025).item()
-        upper_bound = torch.quantile(bootstrap_estimates, 0.975).item()
-
-        return {"lower_bound": lower_bound, "upper_bound": upper_bound}
-
 class DirectMethodEstimator(BaseOffPolicyEstimator):
     def __init__(self, reward_model, target_policy, context):
         """
@@ -74,12 +51,9 @@ class DirectMethodEstimator(BaseOffPolicyEstimator):
         self.context = context
 
     def _estimate_pred_rewards(self) -> torch.Tensor:
-        pred_rewards = []
-        for x_i in self.context:
-            a_i = self.target_policy.sample_action(x_i)
-            r_pred = self.reward_model.predict(x_i, a_i)
-            pred_rewards.append(r_pred)
-        return torch.stack(pred_rewards)
+        actions = self.target_policy.sample_action(self.context) 
+        pred_rewards = self.reward_model.predict(self.context, actions) 
+        return pred_rewards
 
     def estimate_policy_value(self) -> float:
         predicted_rewards = self._estimate_pred_rewards()
@@ -89,21 +63,6 @@ class DirectMethodEstimator(BaseOffPolicyEstimator):
         predicted_rewards = self._estimate_pred_rewards()
         return predicted_rewards.mean()
 
-    def estimate_interval(self, n_bootstrap: int = 1000) -> Dict[str, float]:
-        predicted_rewards = self._estimate_pred_rewards()
-        n = len(predicted_rewards)
-        bootstrap_estimates = torch.zeros(n_bootstrap)
-
-        for i in range(n_bootstrap):
-            indices = torch.randint(0, n, (n,))
-            sampled_preds = predicted_rewards[indices]
-            bootstrap_estimates[i] = sampled_preds.mean()
-
-        lower_bound = torch.quantile(bootstrap_estimates, 0.025).item()
-        upper_bound = torch.quantile(bootstrap_estimates, 0.975).item()
-
-        return {"lower_bound": lower_bound, "upper_bound": upper_bound}
-    
 class DoublyRobustEstimator(BaseOffPolicyEstimator):
     def __init__(self, reward_model, context, actions, 
                  behavior_pscore, target_pscore, rewards):
@@ -135,18 +94,3 @@ class DoublyRobustEstimator(BaseOffPolicyEstimator):
     def estimate_policy_value_tensor(self) -> torch.Tensor:
         dr_reward = self._estimate_dr_rewards()
         return dr_reward.mean()
-
-    def estimate_interval(self, n_bootstrap: int = 1000) -> Dict[str, float]:
-        dr_rewards = self._estimate_dr_rewards()
-        n = len(dr_rewards)
-        bootstrap_estimates = torch.zeros(n_bootstrap)
-
-        for i in range(n_bootstrap):
-            indices = torch.randint(0, n, (n,))
-            sampled_dr = dr_rewards[indices]
-            bootstrap_estimates[i] = sampled_dr.mean()
-
-        lower_bound = torch.quantile(bootstrap_estimates, 0.025).item()
-        upper_bound = torch.quantile(bootstrap_estimates, 0.975).item()
-
-        return {"lower_bound": lower_bound, "upper_bound": upper_bound}
