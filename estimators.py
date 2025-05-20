@@ -98,14 +98,14 @@ class DoublyRobustEstimator(BaseOffPolicyEstimator):
         return dr_reward.mean()
 
 class KernelISEstimator(BaseOffPolicyEstimator):
-    def __init__(self, data, target_policy, logging_policy, kernel, tau, h_model, num_epochs=10):
+    def __init__(self, data, target_policy, logging_policy, kernel, tau, marginal_density_model, num_epochs=10):
         """
         data: list of tuples (x_i, y_i, r_i)
         target_policy: evaluation policy π (supports sample_latent, sample_action, log_grad)
         logging_policy: logging policy π₀ (supports sample_action(x))
         kernel: function K(y, y', x, tau)
         tau: temperature for kernel
-        h_model: model that approximates logging marginal density π₀(y | x)
+        marginal_density_model: model that approximates logging marginal density π₀(y | x)
         num_epochs: training iterations for h_model
         """
         self.data = data
@@ -113,18 +113,18 @@ class KernelISEstimator(BaseOffPolicyEstimator):
         self.logging_policy = logging_policy
         self.kernel = kernel
         self.tau = tau
-        self.h_model = h_model
+        self.marginal_density_model = marginal_density_model
         self.num_epochs = num_epochs
 
     def estimateLMD(self):
         """Train h_model to estimate logging marginal density."""
         for _ in range(self.num_epochs):
             for x_i, y_i, _ in self.data:
-                y_prime = self.logging_policy.sample_action(x_i)
-                k_val = self.kernel(y_i, y_prime, x_i, self.tau)
-                h_pred = self.h_model.predict(x_i, y_i)
-                loss = (h_pred - k_val) ** 2
-                self.h_model.update(x_i, y_i, loss)
+                sampled_action = self.logging_policy.sample_action(x_i)
+                k_val = self.kernel(y_i, sampled_action, x_i, self.tau)
+                predicted_density = self.marginal_density_model.predict(x_i, y_i)
+                loss = (predicted_density - k_val) ** 2
+                self.marginal_density_model.update(x_i, y_i, loss)
 
     def _estimate_policy_gradient(self) -> torch.Tensor:
         grad = []
@@ -133,8 +133,8 @@ class KernelISEstimator(BaseOffPolicyEstimator):
             y = self.target_policy.sample_action(x_i, A_k, W_k)
 
             k_val = self.kernel(y, y_i, x_i, self.tau)
-            h_val = self.h_model.predict(x_i, y_i)
-            is_weight = k_val / h_val
+            density_estimate = self.marginal_density_model.predict(x_i, y_i)
+            is_weight = k_val / density_estimate
 
             log_grad = self.target_policy.log_grad(W_k, A_k, x_i)
             grad.append(-is_weight.detach() * r_i.detach() * log_grad)
