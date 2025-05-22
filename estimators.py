@@ -1,5 +1,4 @@
 from abc import ABC, abstractmethod
-from typing import Dict
 import torch
 
 class BaseOffPolicyEstimator(ABC):
@@ -126,24 +125,23 @@ class KernelISEstimator(BaseOffPolicyEstimator):
                 loss = (predicted_density - k_val) ** 2
                 self.marginal_density_model.update(x_i, y_i, loss)
 
-    def _estimate_policy_gradient(self) -> torch.Tensor:
-        grad = []
+    def kernel_is_value_estimate(self) -> torch.Tensor:
+        values = []
         for x_i, y_i, r_i in self.data:
-            W_k, A_k = self.target_policy.sample_latent(x_i) 
+            W_k, A_k = self.target_policy.sample_latent(x_i)
             y = self.target_policy.sample_action(x_i, A_k, W_k)
 
             k_val = self.kernel(y, y_i, x_i, self.tau)
             density_estimate = self.marginal_density_model.predict(x_i, y_i)
+
             is_weight = k_val / density_estimate
+            values.append(is_weight * r_i)
 
-            log_grad = self.target_policy.log_grad(W_k, A_k, x_i)
-            grad.append(-is_weight.detach() * r_i.detach() * log_grad)
-
-        return torch.stack(grad).mean()
+        return torch.stack(values).mean()
 
     def estimate_policy_value(self) -> float:
         return self.estimate_policy_value_tensor().item()
     
     def estimate_policy_value_tensor(self) -> torch.Tensor:
         self.estimateLMD()
-        return self._estimate_policy_gradient()
+        return self.kernel_is_value_estimate()
