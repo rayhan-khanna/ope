@@ -1,7 +1,9 @@
 import torch
+import torch.optim as optim
 import numpy as np
 from synthetic_bandit_dataset import CustomSyntheticBanditDataset
-from action_policies import UniformRandomPolicy, SoftmaxPolicy
+from action_policies import UniformRandomPolicy, SoftmaxPolicy, TwoStageRankingPolicy
+from two_stage_bandit import TwoTowerFirstStagePolicy, SoftmaxSecondStagePolicy, ma_et_al_loss
 from estimators import (
     ImportanceSamplingEstimator,
     DirectMethodEstimator,
@@ -60,13 +62,13 @@ if __name__ == "__main__":
         random_state=0,
         device="cpu"
     )
-    fb = dataset.obtain_batch_bandit_feedback(n_samples=2000)
+    bandit_feedback = dataset.obtain_batch_bandit_feedback(n_samples=2000)
 
-    x          = fb["context"]     
-    candidates = fb["candidates"] 
-    a_taken    = fb["action"]      
-    r          = fb["reward"]      
-    pi_b       = fb["pscore"]     
+    x          = bandit_feedback["context"]     
+    candidates = bandit_feedback["candidates"] 
+    a_taken    = bandit_feedback["action"]      
+    r          = bandit_feedback["reward"]      
+    pi_b       = bandit_feedback["pscore"]     
     action_context    = dataset.action_context 
 
     # Compute π_t for each logged action
@@ -74,6 +76,31 @@ if __name__ == "__main__":
 
     # Initialize true reward model
     rm = TrueRewardModel(action_context)
+
+    dim_context = dataset.dim_context
+    num_items = dataset.n_actions
+    emb_dim = 32
+    top_k = dataset.top_k
+
+    first_stage_model = TwoTowerFirstStagePolicy(dim_context, num_items, emb_dim, top_k)
+    second_stage_model = SoftmaxSecondStagePolicy(dim_context, emb_dim, first_stage_model)
+    optimizer = optim.Adam(first_stage_model.parameters())
+    num_epochs = 100
+
+    for epoch in range(num_epochs):
+        optimizer.zero_grad()
+        loss = ma_et_al_loss(first_stage_model, second_stage_model, x, a_taken, pi_b, r, candidates)
+        loss.backward()
+        optimizer.step()
+        #if epoch % 10 == 0:
+        #    print(f'Epoch [{epoch+1}/{num_epochs}], Loss: {loss.item():.4f}')
+
+    two_stage_policy = TwoStageRankingPolicy(
+        first_stage_model,      # your trained TwoTowerFirstStagePolicy
+        second_stage_model,     # your trained SoftmaxSecondStagePolicy
+        top_k=dataset.top_k,
+        device="cpu"
+    )
 
     # Initialize estimators
     ise = ImportanceSamplingEstimator(pi_b, pi_t, r)
@@ -90,7 +117,21 @@ if __name__ == "__main__":
         num_epochs=3
     )
 
+    dm_2stage = DirectMethodEstimator(rm, two_stage_policy, x, action_context)
+    kis_2stage = KernelISEstimator(
+        data=list(zip(x, a_taken, r)),
+        target_policy=two_stage_policy,
+        logging_policy=log_policy,
+        kernel=lambda y, y2, xc, tau: torch.exp(-torch.norm(action_context[y] - action_context[y2])**2 / tau),
+        tau=1.0,
+        marginal_density_model=DummyDensityModel(),
+        action_context=action_context,
+        num_epochs=3
+    )
+
     print(f"IS estimate: {ise.estimate_policy_value():.4f}")
     print(f"DM estimate: {dm.estimate_policy_value():.4f}")
     print(f"DR estimate: {dr.estimate_policy_value():.4f}")
     print(f"KIS estimate: {kis.estimate_policy_value():.4f}")
+    print(f"DM (2-stage) estimate:  {dm_2stage.estimate_policy_value():.4f}")
+    print(f"KIS (2-stage) estimate: {kis_2stage.estimate_policy_value():.4f}")
