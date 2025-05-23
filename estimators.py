@@ -8,7 +8,7 @@ class BaseOffPolicyEstimator(ABC):
     def estimate_policy_value(self) -> float:
         """Estimate the expected reward of the target policy."""
         pass
-
+ 
     @abstractmethod
     def estimate_policy_value_tensor(self) -> torch.Tensor:
         """Estimate the expected reward of the target policy."""
@@ -39,7 +39,7 @@ class ImportanceSamplingEstimator(BaseOffPolicyEstimator):
         return weighted_rewards.mean()
 
 class DirectMethodEstimator(BaseOffPolicyEstimator):
-    def __init__(self, reward_model, target_policy, context):
+    def __init__(self, reward_model, target_policy, context, action_context):
         """
         reward_model: model that predicts expected reward given x, a 
         target_policy: model that samples actions from target policy
@@ -48,9 +48,10 @@ class DirectMethodEstimator(BaseOffPolicyEstimator):
         self.reward_model = reward_model
         self.target_policy = target_policy
         self.context = context
+        self.action_context = action_context
 
     def _estimate_pred_rewards(self) -> torch.Tensor:
-        actions = self.target_policy.sample_action(self.context) 
+        actions = [self.target_policy.sample_action(x_i, self.action_context) for x_i in self.context]
         pred_rewards = self.reward_model.predict(self.context, actions) 
         return pred_rewards
 
@@ -64,7 +65,7 @@ class DirectMethodEstimator(BaseOffPolicyEstimator):
 
 class DoublyRobustEstimator(BaseOffPolicyEstimator):
     def __init__(self, reward_model, context, actions, 
-                 behavior_pscore, target_pscore, rewards):
+                 behavior_pscore, target_pscore, rewards, target_policy, action_context):
         """
         reward_model: model that predicts expected reward given x, a 
         context: contexts (x_i's)
@@ -72,16 +73,20 @@ class DoublyRobustEstimator(BaseOffPolicyEstimator):
         behavior_pscore: prob under behavior (logging) policy
         target_pscore: prob under target policy
         rewards: observed rewards
+        target_policy: model that samples actions from target policy
+        action_context: action contexts
         """
         self.reward_model = reward_model
         self.context = context
         self.behavior_pscore = behavior_pscore
         self.target_pscore = target_pscore
         self.rewards = rewards
+        self.target_policy = target_policy
         self.actions = actions
+        self.action_context = action_context
 
     def _estimate_dr_rewards(self) -> torch.Tensor:
-        target_actions = self.target_policy.sample_action(self.context)
+        target_actions = [self.target_policy.sample_action(x_i, self.action_context) for x_i in self.context]
         q_target = self.reward_model.predict(self.context, target_actions)
         q_logged = self.reward_model.predict(self.context, self.actions)
         weights = self.target_pscore / self.behavior_pscore
@@ -97,7 +102,7 @@ class DoublyRobustEstimator(BaseOffPolicyEstimator):
         return dr_reward.mean()
 
 class KernelISEstimator(BaseOffPolicyEstimator):
-    def __init__(self, data, target_policy, logging_policy, kernel, tau, marginal_density_model, num_epochs=10):
+    def __init__(self, data, target_policy, logging_policy, kernel, tau, marginal_density_model, action_context, num_epochs=10):
         """
         data: list of tuples (x_i, y_i, r_i)
         target_policy: evaluation policy π (supports sample_latent, sample_action, log_grad)
@@ -105,7 +110,8 @@ class KernelISEstimator(BaseOffPolicyEstimator):
         kernel: function K(y, y', x, tau)
         tau: temperature for kernel
         marginal_density_model: model that approximates logging marginal density π₀(y | x)
-        num_epochs: training iterations for h_model
+        action_context: action contexts
+        num_epochs: training iterations for h_model 
         """
         self.data = data
         self.target_policy = target_policy
@@ -113,13 +119,14 @@ class KernelISEstimator(BaseOffPolicyEstimator):
         self.kernel = kernel
         self.tau = tau
         self.marginal_density_model = marginal_density_model
+        self.action_context = action_context
         self.num_epochs = num_epochs
 
     def estimateLMD(self):
         """Train h_model to estimate logging marginal density."""
         for _ in range(self.num_epochs):
             for x_i, y_i, _ in self.data:
-                sampled_action = self.logging_policy.sample_action(x_i)
+                sampled_action = self.logging_policy.sample_action(x_i, self.action_context)
                 k_val = self.kernel(y_i, sampled_action, x_i, self.tau)
                 predicted_density = self.marginal_density_model.predict(x_i, y_i)
                 loss = (predicted_density - k_val) ** 2
@@ -128,10 +135,7 @@ class KernelISEstimator(BaseOffPolicyEstimator):
     def kernel_is_value_estimate(self) -> torch.Tensor:
         values = []
         for x_i, y_i, r_i in self.data:
-            W_k, A_k = self.target_policy.sample_latent(x_i)
-            y = self.target_policy.sample_action(x_i, A_k, W_k)
-
-            k_val = self.kernel(y, y_i, x_i, self.tau)
+            k_val = self.kernel(y_i, y_i, x_i, self.tau)
             density_estimate = self.marginal_density_model.predict(x_i, y_i)
 
             is_weight = k_val / density_estimate
