@@ -1,5 +1,6 @@
 import torch
 import torch.optim as optim
+import torch.nn as nn
 import numpy as np
 from synthetic_bandit_dataset import CustomSyntheticBanditDataset
 from action_policies import UniformRandomPolicy, SoftmaxPolicy, TwoStageRankingPolicy
@@ -10,6 +11,7 @@ from estimators import (
     DoublyRobustEstimator, 
     KernelISEstimator
 )
+import matplotlib.pyplot as plt
  
 class TrueRewardModel:
     def __init__(self, action_context: torch.Tensor):
@@ -18,16 +20,28 @@ class TrueRewardModel:
     def predict(self, contexts: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
         return (contexts * self.action_context[actions]).sum(dim=1)
 
-# Dummy marginal‐density model for Kernel IS eval
-class DummyDensityModel:
-    """Always returns 1.0, and ignores updates (so KIS = IS)."""
-    def predict(self, x, y):
-        return torch.tensor(1.0, device=x.device)
+class MarginalDensityModel(nn.Module):
+    def __init__(self, context_dim, action_dim, hidden_size=64):
+        super().__init__()
+        self.model = nn.Sequential(
+            nn.Linear(context_dim + action_dim, hidden_size),
+            nn.ReLU(),
+            nn.Linear(hidden_size, 1),
+            nn.Softplus()  # ensures positive output
+        )
 
-    def update(self, x, y, loss):
-        pass
+    def forward(self, x, action_embed):
+        # x: [1, context_dim]
+        # action_embed: [1, action_dim]
+        input = torch.cat([x, action_embed], dim=1)
+        return self.model(input).squeeze()
 
-# Compute π_t for logged actions
+    def predict(self, x, a_idx, action_context):
+        # Inputs: x (1D), a_idx (int), action_context (embedding table)
+        a_embed = action_context[a_idx].unsqueeze(0)  # shape [1, action_dim]
+        x = x.unsqueeze(0)                            # shape [1, context_dim]
+        return self.forward(x, a_embed)               # scalar output
+
 def compute_target_pscores(context, candidates, actions, action_context, policy: SoftmaxPolicy):
     """
     For each i: compute π_t(a_i | x_i) under `policy` over its candidate set.
@@ -85,6 +99,7 @@ if __name__ == "__main__":
     first_stage_model = TwoTowerFirstStagePolicy(dim_context, num_items, emb_dim, top_k)
     second_stage_model = SoftmaxSecondStagePolicy(dim_context, emb_dim, first_stage_model)
     optimizer = optim.Adam(first_stage_model.parameters())
+
     num_epochs = 100
 
     for epoch in range(num_epochs):
@@ -92,16 +107,14 @@ if __name__ == "__main__":
         loss = ma_et_al_loss(first_stage_model, second_stage_model, x, a_taken, pi_b, r, candidates)
         loss.backward()
         optimizer.step()
-        #if epoch % 10 == 0:
-        #    print(f'Epoch [{epoch+1}/{num_epochs}], Loss: {loss.item():.4f}')
-
     two_stage_policy = TwoStageRankingPolicy(
-        first_stage_model,      # your trained TwoTowerFirstStagePolicy
-        second_stage_model,     # your trained SoftmaxSecondStagePolicy
+        first_stage_model,     
+        second_stage_model,
         top_k=dataset.top_k,
         device="cpu"
     )
 
+    kis_density_model = MarginalDensityModel(context_dim=x.shape[1], action_dim=action_context.shape[1])
     # Initialize estimators
     ise = ImportanceSamplingEstimator(pi_b, pi_t, r)
     dm  = DirectMethodEstimator(rm, target_policy, x, action_context)
@@ -112,7 +125,7 @@ if __name__ == "__main__":
         logging_policy=log_policy,
         kernel=lambda y, y2, x, tau: torch.exp(-torch.norm(action_context[y] - action_context[y2])**2 / tau),
         tau=1.0,
-        marginal_density_model=DummyDensityModel(),
+        marginal_density_model=kis_density_model,
         action_context=action_context, 
         num_epochs=3
     )
@@ -124,14 +137,32 @@ if __name__ == "__main__":
         logging_policy=log_policy,
         kernel=lambda y, y2, xc, tau: torch.exp(-torch.norm(action_context[y] - action_context[y2])**2 / tau),
         tau=1.0,
-        marginal_density_model=DummyDensityModel(),
+        marginal_density_model=kis_density_model,
         action_context=action_context,
         num_epochs=3
     )
 
-    print(f"IS estimate: {ise.estimate_policy_value():.4f}")
-    print(f"DM estimate: {dm.estimate_policy_value():.4f}")
-    print(f"DR estimate: {dr.estimate_policy_value():.4f}")
-    print(f"KIS estimate: {kis.estimate_policy_value():.4f}")
-    print(f"DM (2-stage) estimate:  {dm_2stage.estimate_policy_value():.4f}")
-    print(f"KIS (2-stage) estimate: {kis_2stage.estimate_policy_value():.4f}")
+    estimates = {
+    "IS": ise.estimate_policy_value(),
+    "DM": dm.estimate_policy_value(),
+    "DR": dr.estimate_policy_value(),
+    "KIS": kis.estimate_policy_value(),
+    "DM (2-stage)": dm_2stage.estimate_policy_value(),
+    "KIS (2-stage)": kis_2stage.estimate_policy_value()
+    }
+
+    with torch.no_grad():
+      all_h = [kis_density_model.predict(x_i, y_i, action_context).item() for x_i, y_i, _ in kis.data]
+      print(f"h stats — mean: {np.mean(all_h):.4f}, min: {np.min(all_h):.4f}, max: {np.max(all_h):.4f}")
+
+    plt.figure(figsize=(10, 6))
+    plt.bar(estimates.keys(), estimates.values(), color='skyblue', edgecolor='black')
+    plt.yscale("log")  
+    plt.ylabel("Estimated Policy Value")
+    plt.title("Comparison of Off-Policy Estimators (Log Scale)")
+    plt.xticks(rotation=45)
+    plt.grid(axis='y', linestyle='--', alpha=0.7, which='both')
+    plt.tight_layout()
+    for i, (name, val) in enumerate(estimates.items()):
+      plt.text(i, val, f"{val:.2f}", ha='center', va='bottom')
+    plt.show()

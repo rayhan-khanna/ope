@@ -121,26 +121,32 @@ class KernelISEstimator(BaseOffPolicyEstimator):
         self.marginal_density_model = marginal_density_model
         self.action_context = action_context
         self.num_epochs = num_epochs
+        # to know if we actually need to train the density model (or if it's just constant)
+        self.train_density_model = any(p.requires_grad for p in marginal_density_model.parameters()) 
+
 
     def estimateLMD(self):
         """Train h_model to estimate logging marginal density."""
+        if not self.train_density_model:
+            return
+        optimizer = torch.optim.Adam(self.marginal_density_model.parameters(), lr=1e-3)
         for _ in range(self.num_epochs):
             for x_i, y_i, _ in self.data:
+                optimizer.zero_grad()
                 sampled_action = self.logging_policy.sample_action(x_i, self.action_context)
                 k_val = self.kernel(y_i, sampled_action, x_i, self.tau)
-                predicted_density = self.marginal_density_model.predict(x_i, y_i)
+                predicted_density = self.marginal_density_model.predict(x_i, y_i, self.action_context)
                 loss = (predicted_density - k_val) ** 2
-                self.marginal_density_model.update(x_i, y_i, loss)
+                loss.backward()
+                optimizer.step()
 
     def kernel_is_value_estimate(self) -> torch.Tensor:
         values = []
         for x_i, y_i, r_i in self.data:
             k_val = self.kernel(y_i, y_i, x_i, self.tau)
-            density_estimate = self.marginal_density_model.predict(x_i, y_i)
-
+            density_estimate = self.marginal_density_model.predict(x_i, y_i, self.action_context)
             is_weight = k_val / density_estimate
             values.append(is_weight * r_i)
-
         return torch.stack(values).mean()
 
     def estimate_policy_value(self) -> float:
