@@ -27,10 +27,6 @@ class ConstantMarginalDensityModel(nn.Module):
         return self.value
 
 class LearnedMarginalDensityModel(nn.Module):
-    """
-    Trainable model estimating the logging marginal density using context 
-    and action embeddings.
-    """
     def __init__(self, context_dim, action_dim, hidden_size=64):
         super().__init__()
         self.model = nn.Sequential(
