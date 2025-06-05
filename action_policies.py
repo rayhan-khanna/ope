@@ -1,125 +1,134 @@
-from abc import ABC, abstractmethod
-import numpy as np
 import torch
+import torch.nn.functional as F
+from abc import ABC, abstractmethod
+
 
 class BaseActionPolicy(ABC):
-    """Abstract base class for action policies."""
-    
+    """Abstract base class for Torch-native action policies."""
+
     @abstractmethod
-    def select_action(self, candidates, context, action_context):
-        """
-        Given top-K candidate actions and the context, select an action.
-
-        Args:
-            candidates (np.ndarray): Array of shape (top_k,) containing action indices.
-            context (np.ndarray): Array of shape (dim_context,) representing user context.
-            action_context (np.ndarray): Array of shape (n_actions, dim_context) for action embeddings.
-
-        Returns:
-            int: The chosen action.
-        """
+    def select_action(self, candidates: torch.Tensor, context: torch.Tensor, action_context: torch.Tensor) -> int:
         pass
 
     @abstractmethod
-    def sample_action(self, context, action_context):
-        """
-        Sample a single action from the full action space.
-        """
+    def sample_action(self, context: torch.Tensor, action_context: torch.Tensor) -> int:
         pass
+
+    @abstractmethod
+    def log_prob(self, context: torch.Tensor, action: int, action_context: torch.Tensor) -> torch.Tensor:
+        pass
+
+    @abstractmethod
+    def probs(self, context: torch.Tensor, action_context: torch.Tensor) -> torch.Tensor:
+        pass
+
+    def sample_latent(self, context: torch.Tensor):
+        raise NotImplementedError
+
 
 class UniformRandomPolicy(BaseActionPolicy):
-    """Uniform Random action selection policy."""
-
-    def __init__(self, random_state=42):
-        self.random_ = np.random.RandomState(random_state)
-
     def select_action(self, candidates, context, action_context):
-        return self.random_.choice(candidates)
+        idx = torch.randint(0, len(candidates), (1,)).item()
+        return candidates[idx].item()
 
     def sample_action(self, context, action_context):
-        return self.random_.choice(len(action_context))
+        return torch.randint(0, len(action_context), (1,)).item()
+
+    def log_prob(self, context, action, action_context):
+        prob = 1.0 / action_context.size(0)
+        return torch.log(torch.tensor(prob, dtype=torch.float32))
+
+    def probs(self, context, action_context):
+        n = action_context.size(0)
+        return torch.ones(n, dtype=torch.float32) / n
+
 
 class EpsilonGreedyPolicy(BaseActionPolicy):
-    """Epsilon-Greedy action selection policy."""
-    
-    def __init__(self, epsilon=0.1, random_state=42):
+    def __init__(self, epsilon=0.1):
         self.epsilon = epsilon
-        self.random_ = np.random.RandomState(random_state)
 
     def select_action(self, candidates, context, action_context):
-        # randomly pick 10 items from top-k
-        sampled_candidates = self.random_.choice(candidates, size=min(10, len(candidates)), replace=False)
-
-        if self.random_.rand() < self.epsilon:
-            # exploration
-            return self.random_.choice(sampled_candidates)
-        else:
-            # exploitation: action with the highest score (dot product)
-            scores = np.dot(context, action_context[sampled_candidates].T)  
-            return sampled_candidates[np.argmax(scores)]
+        sampled = candidates[torch.randperm(len(candidates))[:min(10, len(candidates))]]
+        if torch.rand(1).item() < self.epsilon:
+            return sampled[torch.randint(0, len(sampled), (1,))].item()
+        scores = torch.matmul(action_context[sampled], context)
+        return sampled[torch.argmax(scores)].item()
 
     def sample_action(self, context, action_context):
-        if self.random_.rand() < self.epsilon:
-            return self.random_.choice(len(action_context))
-        else:
-            scores = np.dot(context, action_context.T)
-            return np.argmax(scores)
-        
+        if torch.rand(1).item() < self.epsilon:
+            return torch.randint(0, len(action_context), (1,)).item()
+        scores = torch.matmul(action_context, context)
+        return torch.argmax(scores).item()
+
+    def log_prob(self, context, action, action_context):
+        scores = torch.matmul(action_context, context)
+        greedy_action = torch.argmax(scores).item()
+        n = action_context.size(0)
+        prob = (1 - self.epsilon) + self.epsilon / n if action == greedy_action else self.epsilon / n
+        return torch.log(torch.tensor(prob, dtype=torch.float32))
+
+    def probs(self, context, action_context):
+        scores = torch.matmul(action_context, context)
+        greedy_action = torch.argmax(scores).item()
+        n = action_context.size(0)
+        probs = torch.full((n,), self.epsilon / n, dtype=torch.float32)
+        probs[greedy_action] += (1.0 - self.epsilon)
+        return probs
+
+
 class SoftmaxPolicy(BaseActionPolicy):
-    """Softmax action selection policy."""
-    
-    def __init__(self, temperature=1.0, random_state=42):
+    def __init__(self, temperature=1.0):
         self.temperature = temperature
-        self.random_ = np.random.RandomState(random_state)
 
     def select_action(self, candidates, context, action_context):
-        sampled_candidates = self.random_.choice(candidates, size=min(10, len(candidates)), replace=False)
-        scores = np.dot(context, action_context[sampled_candidates].T)
+        sampled = candidates[torch.randperm(len(candidates))[:min(10, len(candidates))]]
+        scores = torch.matmul(action_context[sampled], context) / self.temperature
+        probs = F.softmax(scores, dim=0)
+        idx = torch.multinomial(probs, 1).item()
+        return sampled[idx].item()
 
-        exp_scores = np.exp(scores / self.temperature)  
-        probabilities = exp_scores / np.sum(exp_scores) 
-
-        return self.random_.choice(sampled_candidates, p=probabilities)
-    
     def sample_action(self, context, action_context):
-        scores = np.dot(context, action_context.T)
-        exp_scores = np.exp(scores / self.temperature)
-        probabilities = exp_scores / np.sum(exp_scores)
-        return self.random_.choice(len(action_context), p=probabilities)
-    
+        scores = torch.matmul(action_context, context) / self.temperature
+        probs = F.softmax(scores, dim=0)
+        return torch.multinomial(probs, 1).item()
+
+    def log_prob(self, context, action, action_context):
+        scores = torch.matmul(action_context, context) / self.temperature
+        probs = F.softmax(scores, dim=0)
+        return torch.log(probs[action])
+
+    def probs(self, context, action_context):
+        scores = torch.matmul(action_context, context) / self.temperature
+        return F.softmax(scores, dim=0)
+
+
 class TwoStageRankingPolicy(BaseActionPolicy):
-    """
-    Wraps a two-tower first-stage model and a second-stage softmax model
-    to provide Plackett-Luce ranking over top-k candidates.
-    """
     def __init__(self, first_stage_model, second_stage_model, top_k, device="cpu"):
         self.first_stage = first_stage_model
         self.second_stage = second_stage_model
         self.top_k = top_k
         self.device = device
 
-    def select_action(self, candidates, context_np, action_context_np):
-        context = torch.tensor(context_np, dtype=torch.float32).unsqueeze(0).to(self.device)
-        candidates = torch.tensor(candidates, dtype=torch.long).unsqueeze(0).to(self.device)
-        probs = self.second_stage(context, candidates)
-        action_idx = torch.multinomial(probs[0], 1).item()
-        return candidates[0, action_idx].item()
-
-    def sample_action(self, context_np, action_context_np):
-        context = context_np.clone().detach().unsqueeze(0).to(self.device)
-        _, topk = self.first_stage(context)
-        probs = self.second_stage(context, topk)
+    def sample_action(self, context: torch.Tensor, action_context: torch.Tensor):
+        _, topk = self.first_stage(context.unsqueeze(0))
+        probs = self.second_stage(context.unsqueeze(0), topk)
         action_idx = torch.multinomial(probs[0], 1).item()
         return topk[0, action_idx].item()
 
-    def rank_topk(self, context_tensor):
-        """
-        Plackett-Luce-style ranking using Gumbel top-k sampling.
-        Returns a full ranking of top-k items for each context.
-        """
+    def sample_latent(self, context: torch.Tensor):
+        _, topk = self.first_stage(context.unsqueeze(0))
+        return None, topk
+
+    def log_prob(self, context: torch.Tensor, action: int, action_context: torch.Tensor):
+        raise NotImplementedError
+
+    def probs(self, context: torch.Tensor, action_context: torch.Tensor):
+        raise NotImplementedError
+
+    def rank_topk(self, context_tensor: torch.Tensor):
         with torch.no_grad():
-            _, topk = self.first_stage(context_tensor)  # [B, k]
-            scores = self.second_stage(context_tensor, topk)  # [B, k]
+            _, topk = self.first_stage(context_tensor)
+            scores = self.second_stage(context_tensor, topk)
             gumbel = self.sample_gumbel(scores.shape, device=scores.device)
             noisy_scores = scores + gumbel
             ranked = topk[torch.arange(len(topk)).unsqueeze(1), torch.argsort(noisy_scores, dim=1, descending=True)]

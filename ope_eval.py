@@ -8,7 +8,6 @@ from estimators import (
     KernelISEstimator
 )
 import torch.nn as nn
-import random
 import numpy as np
 
 class TrueRewardModel:
@@ -72,7 +71,6 @@ def estimate_true_policy_value(policy, reward_model, contexts):
 def evaluate(method: str, seed: int = 42):
     torch.manual_seed(seed)
     np.random.seed(seed)
-    random.seed(seed)
     device = "cpu"
     dataset = torch.load(f"{method}_data.pt")
 
