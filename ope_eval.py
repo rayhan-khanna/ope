@@ -21,13 +21,10 @@ class TrueRewardModel:
 class ConstantMarginalDensityModel(nn.Module):
     def __init__(self, constant: float = 1.0):
         super().__init__()
-        self.constant = constant
-
-    def forward(self, x, a_embed):
-        return torch.full((x.size(0),), self.constant, device=x.device)
+        self.register_buffer("value", torch.tensor(constant))
 
     def predict(self, x, a_idx, action_context):
-        return torch.tensor(self.constant, device=x.device)
+        return self.value
 
 class LearnedMarginalDensityModel(nn.Module):
     """
