@@ -1,6 +1,31 @@
 import torch
 import torch.nn.functional as F
 
+class DirectMethodGradient:
+    def __init__(self, reward_model, target_policy, context, action_context):
+        self.reward_model = reward_model
+        self.target_policy = target_policy
+        self.context = context
+        self.action_context = action_context
+
+    def estimate_policy_gradient(self):
+        pi_theta = self.target_policy.probs(self.context, self.action_context) 
+
+        batch_size = self.context.size(0)
+        num_actions = self.action_context.size(0)
+
+        all_rewards = torch.stack([
+            self.reward_model.predict(
+                self.context, 
+                torch.full((batch_size,), a_idx, dtype=torch.long, device=self.context.device)
+            ).detach() 
+            for a_idx in range(num_actions)
+        ], dim=1) 
+
+        expected_reward = (pi_theta * all_rewards).sum(dim=1)
+
+        return expected_reward.mean()
+    
 class DoublyRobustGradient:
     def __init__(self, reward_model, context, actions, behavior_pscore, 
                  target_policy, rewards, action_context):
