@@ -2,8 +2,7 @@ import torch
 import torch.nn.functional as F
 
 class ImportanceSamplingGradient:
-    def __init__(self, context: torch.Tensor, actions: torch.Tensor, rewards: torch.Tensor,
-        behavior_pscore: torch.Tensor, target_policy, action_context: torch.Tensor):
+    def __init__(self, context, actions, rewards, behavior_pscore, target_policy, action_context):
         self.context = context
         self.actions = actions
         self.rewards = rewards

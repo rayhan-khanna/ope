@@ -1,5 +1,6 @@
 import torch
 import torch.nn.functional as F
+import torch.nn as nn
 from abc import ABC, abstractmethod
 
 
@@ -75,32 +76,29 @@ class EpsilonGreedyPolicy(BaseActionPolicy):
         probs[greedy_action] += (1.0 - self.epsilon)
         return probs
 
-
-class SoftmaxPolicy(BaseActionPolicy):
-    def __init__(self, temperature=1.0):
+class SoftmaxPolicy(BaseActionPolicy, nn.Module):
+    def __init__(self, dim_context, dim_action, temperature=1.0):
+        super().__init__()
         self.temperature = temperature
-
-    def select_action(self, candidates, context, action_context):
-        sampled = candidates[torch.randperm(len(candidates))[:min(10, len(candidates))]]
-        scores = torch.matmul(action_context[sampled], context) / self.temperature
-        probs = F.softmax(scores, dim=0)
-        idx = torch.multinomial(probs, 1).item()
-        return sampled[idx].item()
-
-    def sample_action(self, context, action_context):
-        scores = torch.matmul(action_context, context) / self.temperature
-        probs = F.softmax(scores, dim=0)
-        return torch.multinomial(probs, 1).item()
-
-    def log_prob(self, context, action, action_context):
-        scores = torch.matmul(action_context, context) / self.temperature
-        probs = F.softmax(scores, dim=0)
-        return torch.log(probs[action])
+        self.scorer = nn.Linear(dim_context, dim_action, bias=False)  
 
     def probs(self, context, action_context):
-        scores = torch.matmul(action_context, context) / self.temperature
-        return F.softmax(scores, dim=0)
+        logits = context @ self.scorer.weight.T @ action_context
+        return F.softmax(logits / self.temperature, dim=-1)
 
+    def sample_action(self, context, action_context):
+        probs = self.probs(context.unsqueeze(0), action_context)[0]
+        return torch.multinomial(probs, 1).item()
+
+    def select_action(self, candidates, context, action_context):
+        subset_context = action_context[candidates]
+        scores = self.scorer(context.unsqueeze(0)) @ subset_context.T 
+        probs = F.softmax(scores[0] / self.temperature, dim=0)
+        return candidates[torch.multinomial(probs, 1)].item()
+
+    def log_prob(self, context, action: int, action_context):
+        probs = self.probs(context.unsqueeze(0), action_context)[0]
+        return torch.log(probs[action])
 
 class TwoStageRankingPolicy(BaseActionPolicy):
     def __init__(self, first_stage_model, second_stage_model, top_k, device="cpu"):
