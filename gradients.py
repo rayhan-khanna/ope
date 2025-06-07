@@ -1,6 +1,24 @@
 import torch
 import torch.nn.functional as F
 
+class ImportanceSamplingGradient:
+    def __init__(self, context: torch.Tensor, actions: torch.Tensor, rewards: torch.Tensor,
+        behavior_pscore: torch.Tensor, target_policy, action_context: torch.Tensor):
+        self.context = context
+        self.actions = actions
+        self.rewards = rewards
+        self.behavior_pscore = behavior_pscore
+        self.target_policy = target_policy
+        self.action_context = action_context
+
+    def _estimate_policy_gradient(self) -> torch.Tensor:
+        pi_theta = self.target_policy.probs(self.context, self.action_context)
+        target_pscore = pi_theta[torch.arange(len(self.context)), self.actions]
+        weights = target_pscore / self.behavior_pscore
+        weighted_rewards = self.rewards * weights
+        log_pi_theta = self.target_policy.log_prob(self.context, self.actions, self.action_context)
+        return -(weighted_rewards.detach() * log_pi_theta).mean()
+    
 class DirectMethodGradient:
     def __init__(self, reward_model, target_policy, context, action_context):
         self.reward_model = reward_model
@@ -24,7 +42,7 @@ class DirectMethodGradient:
 
         expected_reward = (pi_theta * all_rewards).sum(dim=1)
 
-        return expected_reward.mean()
+        return -expected_reward.mean()
     
 class DoublyRobustGradient:
     def __init__(self, reward_model, context, actions, behavior_pscore, 
