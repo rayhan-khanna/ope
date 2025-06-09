@@ -100,12 +100,20 @@ class SoftmaxPolicy(BaseActionPolicy, nn.Module):
         probs = self.probs(context, action_context)
         return torch.log(probs[torch.arange(len(context)), actions])
 
-class TwoStageRankingPolicy(BaseActionPolicy):
+class TwoStageRankingPolicy(BaseActionPolicy, nn.Module):
     def __init__(self, first_stage_model, second_stage_model, top_k, device="cpu"):
+        super().__init__()
         self.first_stage = first_stage_model
         self.second_stage = second_stage_model
         self.top_k = top_k
         self.device = device
+
+    def select_action(self, candidates, context, action_context):
+        context = context.unsqueeze(0)
+        _, topk = self.first_stage(context)  
+        topk = topk[0]
+        probs = self.second_stage(context, topk.unsqueeze(0))[0]
+        return topk[torch.argmax(probs)].item()
 
     def sample_action(self, context: torch.Tensor, action_context: torch.Tensor):
         _, topk = self.first_stage(context.unsqueeze(0))
@@ -113,15 +121,42 @@ class TwoStageRankingPolicy(BaseActionPolicy):
         action_idx = torch.multinomial(probs[0], 1).item()
         return topk[0, action_idx].item()
 
+    def log_prob(self, context, actions, action_context):
+        if len(context.shape) == 1:
+            context = context.unsqueeze(0)
+        batch_size = context.shape[0]
+        candidates = torch.arange(action_context.shape[0], device=context.device).repeat(batch_size, 1)
+        topk = self.sample_topk(context, candidates)
+        probs = self.second_stage(context, topk)
+        mask = (topk == actions.unsqueeze(1))
+        selected_probs = probs[mask]
+        return torch.log(selected_probs)
+
+    def probs(self, context, action_context):
+        logits = self.first_stage(context)[0]
+        return torch.softmax(logits, dim=1)
+
     def sample_latent(self, context: torch.Tensor):
         _, topk = self.first_stage(context.unsqueeze(0))
         return None, topk
 
-    def log_prob(self, context: torch.Tensor, action: int, action_context: torch.Tensor):
-        raise NotImplementedError
+    def sample_topk(self, context: torch.Tensor, candidates: torch.Tensor):
+        logits = self._full_logits(context)
+        candidate_logits = torch.gather(logits, 1, candidates)
+        gumbel_noise = self.sample_gumbel(candidate_logits.shape, device=logits.device)
+        noisy_logits = candidate_logits + gumbel_noise
+        topk_pos = torch.topk(noisy_logits, self.top_k, dim=1).indices
+        topk_indices = torch.gather(candidates, 1, topk_pos)
+        return topk_indices
 
-    def probs(self, context: torch.Tensor, action_context: torch.Tensor):
-        raise NotImplementedError
+    def log_prob_topk_set(self, context: torch.Tensor, topk_indices: torch.Tensor):
+        logits = self._full_logits(context)
+        log_probs = F.log_softmax(logits, dim=1)
+        log_pi_theta1_Ak = log_probs.gather(1, topk_indices).sum(dim=1)
+        return log_pi_theta1_Ak
+
+    def probs_given_topk(self, context_tensor: torch.Tensor, topk_indices: torch.Tensor):
+        return self.second_stage(context_tensor, topk_indices)
 
     def rank_topk(self, context_tensor: torch.Tensor):
         with torch.no_grad():
@@ -132,6 +167,9 @@ class TwoStageRankingPolicy(BaseActionPolicy):
             ranked = topk[torch.arange(len(topk)).unsqueeze(1), torch.argsort(noisy_scores, dim=1, descending=True)]
         return ranked
 
+    def _full_logits(self, x) -> torch.Tensor:
+        return self.first_stage.full_logits(x)
+    
     @staticmethod
     def sample_gumbel(shape, device):
         U = torch.rand(shape, device=device)

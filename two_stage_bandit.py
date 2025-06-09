@@ -30,6 +30,11 @@ class TwoTowerFirstStagePolicy(nn.Module):
         top_k_probs, top_k_indices = torch.topk(probs, self.top_k, dim=1)
 
         return top_k_probs, top_k_indices
+    
+    def full_logits(self, x: torch.Tensor) -> torch.Tensor:
+        context  = self.context_nn(x)                
+        item_embs = self.item_embeddings.weight        
+        return context @ item_embs.T 
 
 # action selection (softmax)
 class SoftmaxSecondStagePolicy(nn.Module):

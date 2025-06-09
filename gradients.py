@@ -72,22 +72,10 @@ class DRGradient:
 
         return -(q_target.mean() + ((weights * (self.rewards - q_logged)).detach() * log_pi_e).mean())
 
-def sample_gumbel(shape, device):
-    U = torch.rand(shape, device=device)
-    return -torch.log(-torch.log(U))
-
-def gumbel_topk_sampling(candidate_logits, candidates, k):
-    gumbel_noise = sample_gumbel(candidate_logits.shape, candidate_logits.device)
-    noisy_logits = candidate_logits + gumbel_noise
-    topk_pos = torch.topk(noisy_logits, k, dim=1).indices
-    topk_indices = torch.gather(candidates, 1, topk_pos)
-    return topk_indices
-
 class TwoStageISGradient:
-    def __init__(self, model_stage1, model_stage2, context, actions, rewards, 
+    def __init__(self, policy, context, actions, rewards, 
                  behavior_pscore, candidates):
-        self.model_stage1 = model_stage1
-        self.model_stage2 = model_stage2
+        self.policy = policy
         self.context = context
         self.actions = actions
         self.rewards = rewards
@@ -102,26 +90,16 @@ class TwoStageISGradient:
         candidates = self.candidates
         device = x.device
 
-        # 1: compute logits over all items
-        context_repr = self.model_stage1.context_nn(x)
-        item_embs = self.model_stage1.item_embeddings.weight
-        logits = torch.matmul(context_repr, item_embs.T) 
+        # sample top-k set using policy's method
+        topk_indices = self.policy.sample_topk(x, candidates)
 
-        # restrict to candidate set
-        candidate_logits = torch.gather(logits, 1, candidates)
+        # get log pi_1(A_k) using policy
+        log_pi1 = self.policy.log_prob_topk_set(x, topk_indices)
 
-        # Gumbel top-k sampling
-        top_k = self.model_stage1.top_k
-        topk_indices = gumbel_topk_sampling(candidate_logits, candidates, top_k)
+        # get pi_2(a | x, A_k)
+        probs_topk = self.policy.probs_given_topk(x, topk_indices)
 
-        # log π₁(A_k)
-        log_probs = F.log_softmax(logits, dim=1)
-        log_pi_theta1_Ak = log_probs.gather(1, topk_indices).sum(dim=1)
-
-        # 2: compute pi_2(a | x, A_k)
-        probs_topk = self.model_stage2(x, topk_indices)
-
-        # only consider examples where a ∈ A_k
+        # filter to examples where a ∈ A_k
         match_mask = (topk_indices == a_taken.unsqueeze(1))
         action_in_topk = match_mask.any(dim=1)
 
@@ -132,20 +110,22 @@ class TwoStageISGradient:
         probs_topk_valid = probs_topk[action_in_topk]
         pi_theta2_probs = probs_topk_valid[torch.arange(len(idx_valid)), idx_valid]
 
-        log_pi1 = log_pi_theta1_Ak[action_in_topk]
+        # gather valid values
+        log_pi1_valid = log_pi1[action_in_topk]
         pi0_valid = pi0_probs[action_in_topk]
         r_valid = r[action_in_topk]
 
+        # compute weighted loss
         weight = pi_theta2_probs / pi0_valid
-        loss = -weight.detach() * log_pi1 * r_valid
+        loss = -weight.detach() * log_pi1_valid * r_valid
         return loss.mean()
 
 class KernelISGradient:
     def __init__(self, data, target_policy, logging_policy, kernel, tau, marginal_density_model, action_context, num_epochs=10):
         """
         data: list of tuples (x_i, y_i, r_i)
-        target_policy: evaluation policy π (supports sample_latent, sample_action, log_grad)
-        logging_policy: logging policy π₀ (supports sample_action(x))
+        target_policy: evaluation policy pi
+        logging_policy: logging policy pi_theta (supports sample_action(x))
         kernel: function K(y, y', x, tau)
         tau: temperature for kernel
         marginal_density_model: model that approximates logging marginal density π₀(y | x)
@@ -179,16 +159,33 @@ class KernelISGradient:
 
     def _estimate_policy_gradient(self) -> torch.Tensor:
         self.estimateLMD()
-        grad = []
-        for x_i, y_i, r_i in self.data:
-            W_k, A_k = self.target_policy.sample_latent(x_i) 
-            y = self.target_policy.sample_action(x_i, A_k, W_k)
 
-            k_val = self.kernel(y, y_i, x_i, self.tau)
-            density_estimate = self.marginal_density_model.predict(x_i, y_i, self.action_context)
-            is_weight = k_val / density_estimate
+        x = self.context 
+        y_logged = self.actions  
+        r = self.reward
+        B = x.shape[0] # batch size
 
-            log_grad = self.target_policy.log_grad(W_k, A_k, x_i)
-            grad.append(-is_weight.detach() * r_i.detach() * log_grad)
+        W_k, A_k = self.target_policy.sample_latent(x) 
 
-        return torch.stack(grad).mean()
+        y_sampled = torch.tensor([
+            self.target_policy.sample_action(x[i], A_k[i], W_k[i]) for i in range(B)
+        ], device=x.device)
+
+        # compute kernel(y, y_logged)
+        k_val = torch.tensor([
+            self.kernel(y_sampled[i], y_logged[i], x[i], self.tau)
+            for i in range(B)
+        ], device=x.device)
+
+        # estimate logging density h(y_logged | x)
+        pi0_est = self.marginal_density_model.predict(x, y_logged, self.action_context)
+
+        # importance weights
+        is_weight = k_val / pi0_est 
+
+        # log pi_2(A_k) for each context
+        log_pi_theta1_Ak = self.target_policy.log_prob_topk_set(x, A_k)
+
+        # final loss
+        loss = -(is_weight.detach() * r.detach() * log_pi_theta1_Ak).mean()
+        return loss

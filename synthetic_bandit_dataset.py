@@ -5,7 +5,6 @@ from action_policies import SoftmaxPolicy
 
 class CustomSyntheticBanditDataset:
     """Generates synthetic bandit feedback dataset."""
-
     def __init__(self, 
                  n_actions=10000, 
                  dim_context=10, 
@@ -71,6 +70,10 @@ class CustomSyntheticBanditDataset:
                 "actions": actions,
                 "rewards": rewards
             }
+        
+    def sample_k_user_preferences(self, k=5):
+        """Return a small batch of bandit feedback of size k."""
+        return self.obtain_batch_bandit_feedback(n_samples=k)
 
     def candidate_selection(self, context):
         """Select top-K candidates based on inner product search."""
