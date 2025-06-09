@@ -77,13 +77,13 @@ class EpsilonGreedyPolicy(BaseActionPolicy):
         return probs
 
 class SoftmaxPolicy(BaseActionPolicy, nn.Module):
-    def __init__(self, dim_context, dim_action, temperature=1.0):
+    def __init__(self, dim_context, temperature=1.0):
         super().__init__()
         self.temperature = temperature
-        self.scorer = nn.Linear(dim_context, dim_action, bias=False)  
+        self.scorer = nn.Linear(dim_context, dim_context, bias=False)  
 
     def probs(self, context, action_context):
-        logits = context @ self.scorer.weight.T @ action_context
+        logits = self.scorer(context) @ action_context.T
         return F.softmax(logits / self.temperature, dim=-1)
 
     def sample_action(self, context, action_context):
@@ -96,9 +96,9 @@ class SoftmaxPolicy(BaseActionPolicy, nn.Module):
         probs = F.softmax(scores[0] / self.temperature, dim=0)
         return candidates[torch.multinomial(probs, 1)].item()
 
-    def log_prob(self, context, action: int, action_context):
-        probs = self.probs(context.unsqueeze(0), action_context)[0]
-        return torch.log(probs[action])
+    def log_prob(self, context, actions, action_context):
+        probs = self.probs(context, action_context)
+        return torch.log(probs[torch.arange(len(context)), actions])
 
 class TwoStageRankingPolicy(BaseActionPolicy):
     def __init__(self, first_stage_model, second_stage_model, top_k, device="cpu"):

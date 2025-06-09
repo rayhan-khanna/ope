@@ -13,7 +13,8 @@ class CustomSyntheticBanditDataset:
                  reward_std=1.0, 
                  random_state=42,
                  action_policy=None, 
-                 device="cpu"): 
+                 device="cpu", 
+                 single_stage=True): 
         
         self.n_actions = n_actions
         self.dim_context = dim_context
@@ -26,25 +27,50 @@ class CustomSyntheticBanditDataset:
         self.action_context = torch.tensor(
             self.random_.normal(size=(n_actions, dim_context)), dtype=torch.float32
         ).to(self.device)
-        
+
+        self.single_stage = single_stage
+
         if action_policy is None:
-            print("No action policy provided: defaulting to SoftmaxPolicy.")
-            self.action_policy = SoftmaxPolicy(temperature=1.0, random_state=random_state)
+            self.action_policy = SoftmaxPolicy(dim_context)
         else:
             self.action_policy = action_policy
 
+    def sample_context(self, n):
+        """Sample n context vectors from a Gaussian distribution."""
+        return torch.tensor(
+            self.random_.normal(size=(n, self.dim_context)),
+            dtype=torch.float32,
+            device=self.device
+        )
+
+    def sample_policy_full(self, context):
+        """Sample from full action space (no top-k restriction)."""
+        return torch.tensor([
+            self.action_policy.sample_action(context[i], self.action_context)
+            for i in range(context.shape[0])
+        ], dtype=torch.long).to(self.device)
+
     def generate_data(self, context):
         """Generate synthetic dataset."""
-        candidates = self.candidate_selection(context)
-        actions = self.sample_policy(candidates, context)
-        rewards = self.reward_function(context, actions)
+        if self.single_stage:
+            actions = self.sample_policy_full(context)
+            rewards = self.reward_function(context, actions)
+            return {
+                "context": context,
+                "actions": actions,
+                "rewards": rewards
+            }
+        else: 
+            candidates = self.candidate_selection(context)
+            actions = self.sample_policy(candidates, context)
+            rewards = self.reward_function(context, actions)
 
-        return {
-            "context": context,
-            "candidates": candidates,
-            "actions": actions,
-            "rewards": rewards
-        }
+            return {
+                "context": context,
+                "candidates": candidates,
+                "actions": actions,
+                "rewards": rewards
+            }
 
     def candidate_selection(self, context):
         """Select top-K candidates based on inner product search."""
@@ -77,32 +103,48 @@ class CustomSyntheticBanditDataset:
         ).to(self.device)
         data = self.generate_data(context)
 
-        expected_rewards = torch.zeros((n_samples, self.top_k), dtype=torch.float32).to(self.device)
+        
+        if self.single_stage:
+            pi_b_logits = torch.randn(n_samples, self.n_actions).to(self.device)
+            pi_b = torch.softmax(pi_b_logits, dim=1)
+            pscore = pi_b[torch.arange(n_samples), data["actions"]]
 
-        for i in range(n_samples):
-            expected_rewards[i, :] = self.reward_function(
-                data["context"][i:i+1], data["candidates"][i]
-            )
+            return {
+                "n_samples": n_samples,
+                "context": data["context"],
+                "action": data["actions"],
+                "reward": data["rewards"],
+                "pi_b": pi_b,
+                "pscore": pscore
+            }
 
-        # compute policy probabilities
-        pi_b_logits = torch.tensor(
-            self.random_.normal(size=data["candidates"].shape), dtype=torch.float32
-        ).to(self.device)
-        pi_b = torch.exp(pi_b_logits) / torch.sum(torch.exp(pi_b_logits), dim=1, keepdim=True)
+        else:   
+            expected_rewards = torch.zeros((n_samples, self.top_k), dtype=torch.float32).to(self.device)
 
-        # get probability of chosen action
-        chosen_prob = torch.tensor([
-            pi_b[i, (data["candidates"][i] == data["actions"][i]).nonzero(as_tuple=True)[0]].item()
-            for i in range(n_samples)
-        ], dtype=torch.float32).to(self.device)
+            for i in range(n_samples):
+                expected_rewards[i, :] = self.reward_function(
+                    data["context"][i:i+1], data["candidates"][i]
+                )
 
-        return {
-            "n_samples": n_samples,
-            "context": data["context"],
-            "candidates": data["candidates"],
-            "action": data["actions"],
-            "reward": data["rewards"],
-            "expected_reward": expected_rewards,
-            "pi_b": pi_b,
-            "pscore": chosen_prob, 
-        }
+            # compute policy probabilities
+            pi_b_logits = torch.tensor(
+                self.random_.normal(size=data["candidates"].shape), dtype=torch.float32
+            ).to(self.device)
+            pi_b = torch.exp(pi_b_logits) / torch.sum(torch.exp(pi_b_logits), dim=1, keepdim=True)
+
+            # get probability of chosen action
+            chosen_prob = torch.tensor([
+                pi_b[i, (data["candidates"][i] == data["actions"][i]).nonzero(as_tuple=True)[0]].item()
+                for i in range(n_samples)
+            ], dtype=torch.float32).to(self.device)
+
+            return {
+                "n_samples": n_samples,
+                "context": data["context"],
+                "candidates": data["candidates"],
+                "action": data["actions"],
+                "reward": data["rewards"],
+                "expected_reward": expected_rewards,
+                "pi_b": pi_b,
+                "pscore": chosen_prob, 
+            }

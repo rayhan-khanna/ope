@@ -3,7 +3,7 @@ import torch
 import torch.optim as optim
 import torch.nn as nn
 import torch.nn.functional as F
-from gradients import DirectMethodGradient, DoublyRobustGradient, ImportanceSamplingGradient
+from gradients import DMGradient, DRGradient, ISGradient
 from estimators import DirectMethodEstimator, DoublyRobustEstimator, ImportanceSamplingEstimator
 from synthetic_bandit_dataset import CustomSyntheticBanditDataset
 from action_policies import UniformRandomPolicy, SoftmaxPolicy
@@ -17,7 +17,9 @@ class RewardModel(nn.Module):
         self.out = nn.Linear(32, 1)
 
     def forward(self, context, action_indices):
-        a_emb = self.action_embed(action_indices)
+        a_emb = self.action_embed(torch.tensor(action_indices, 
+                                               dtype=torch.long, 
+                                               device=context.device))
         x = torch.cat([context, a_emb], dim=-1)
         x = F.relu(self.fc1(x))
         x = F.relu(self.fc2(x))
@@ -59,13 +61,13 @@ def train_model(method: str):
         if epoch % 10 == 0:
             print(f"[RewardModel Epoch {epoch}] MSE Loss: {loss.item():.4f}")
 
-    target_policy = SoftmaxPolicy(dim_context, n_actions).to(device)
+    target_policy = SoftmaxPolicy(dim_context).to(device)
     optimizer = optim.Adam(target_policy.parameters())
 
     for epoch in range(100):
         optimizer.zero_grad()
         if method == "dm":
-          loss_fn = DirectMethodGradient(
+          loss_fn = DMGradient(
              reward_model=reward_model, 
              target_policy=target_policy, 
              context=x,
@@ -74,7 +76,7 @@ def train_model(method: str):
           loss = loss_fn.estimate_policy_gradient()
 
         elif method == "dr":
-          loss_fn = DoublyRobustGradient(
+          loss_fn = DRGradient(
               reward_model=reward_model,
               context=x,
               actions=a_taken,
@@ -86,7 +88,7 @@ def train_model(method: str):
           loss = loss_fn.estimate_policy_gradient()
 
         elif method == "is":
-          loss_fn = ImportanceSamplingGradient(
+          loss_fn = ISGradient(
               context=x,
               actions=a_taken,
               rewards=r,
