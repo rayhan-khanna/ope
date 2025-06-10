@@ -32,9 +32,8 @@ class DMGradient:
         )
         rewards = self.reward_model.predict(self.context, sampled_actions).detach()
         log_probs = self.target_policy.log_prob(self.context, sampled_actions, self.action_context)
-        policy_gradient_loss = -(log_probs * rewards).mean()
-
-        return policy_gradient_loss
+        loss = -(log_probs * rewards).mean()
+        return loss
     
 class DRGradient:
     def __init__(self, reward_model, context, actions, behavior_pscore, 
@@ -113,7 +112,7 @@ class TwoStageISGradient:
 
         # compute weighted loss
         weight = pi_theta2_probs / pi0_valid
-        loss = weight.detach() * log_pi1_valid * r_valid
+        loss = -weight.detach() * log_pi1_valid * r_valid
         return loss.mean()
 
 class KernelISGradient:
