@@ -12,9 +12,9 @@ class RewardModel(nn.Module):
     def __init__(self, dim_context, emb_dim, n_actions):
         super().__init__()
         self.action_embed = nn.Embedding(n_actions, emb_dim)
-        self.fc1 = nn.Linear(dim_context + emb_dim, 64)
-        self.fc2 = nn.Linear(64, 32)
-        self.out = nn.Linear(32, 1)
+        self.fc1 = nn.Linear(dim_context + emb_dim, 128)
+        self.fc2 = nn.Linear(128, 64)
+        self.out = nn.Linear(64, 1)
 
     def forward(self, context, action_indices):
         a_emb = self.action_embed(torch.tensor(action_indices, 
@@ -38,7 +38,7 @@ def train_model(method: str):
         reward_std=0.5,
         device=device
     )
-    bandit_feedback = dataset.obtain_batch_bandit_feedback(n_samples=2000)
+    bandit_feedback = dataset.obtain_batch_bandit_feedback(n_samples=10000)
     x = bandit_feedback["context"]
     a_taken = bandit_feedback["action"]
     r = bandit_feedback["reward"]
@@ -52,7 +52,7 @@ def train_model(method: str):
     reward_model = RewardModel(dim_context, emb_dim, n_actions).to(device)
     reward_optimizer = optim.Adam(reward_model.parameters(), lr=1e-3)
 
-    for epoch in range(100):
+    for epoch in range(300):
         reward_optimizer.zero_grad()
         pred_r = reward_model(x, a_taken)
         loss = nn.MSELoss()(pred_r, r)
@@ -64,7 +64,7 @@ def train_model(method: str):
     target_policy = SoftmaxPolicy(dim_context).to(device)
     optimizer = optim.Adam(target_policy.parameters())
 
-    for epoch in range(100):
+    for epoch in range(300):
         optimizer.zero_grad()
         if method == "dm":
           loss_fn = DMGradient(
@@ -96,7 +96,7 @@ def train_model(method: str):
               target_policy=target_policy,
               action_context=action_context
           )
-          loss = loss_fn._estimate_policy_gradient()
+          loss = loss_fn.estimate_policy_gradient()
 
         loss.backward()
         optimizer.step()

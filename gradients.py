@@ -1,5 +1,4 @@
 import torch
-import torch.nn.functional as F
 
 class ISGradient:
     def __init__(self, context, actions, rewards, behavior_pscore, target_policy, action_context):
@@ -16,7 +15,8 @@ class ISGradient:
         weight = target_pscore / self.behavior_pscore
         weighted_rewards = self.rewards * weight.detach()
         log_pi_theta = self.target_policy.log_prob(self.context, self.actions, self.action_context)
-        return -(weighted_rewards * log_pi_theta).mean()
+        loss = -(weighted_rewards * log_pi_theta).mean()
+        return loss
     
 class DMGradient:
     def __init__(self, reward_model, target_policy, context, action_context):
@@ -26,22 +26,15 @@ class DMGradient:
         self.action_context = action_context
 
     def estimate_policy_gradient(self):
-        pi_theta = self.target_policy.probs(self.context, self.action_context) 
+        sampled_actions = torch.tensor(
+            [self.target_policy.sample_action(x_i, self.action_context) for x_i in self.context],
+            device=self.context.device
+        )
+        rewards = self.reward_model.predict(self.context, sampled_actions).detach()
+        log_probs = self.target_policy.log_prob(self.context, sampled_actions, self.action_context)
+        policy_gradient_loss = -(log_probs * rewards).mean()
 
-        batch_size = self.context.size(0)
-        num_actions = self.action_context.size(0)
-
-        all_rewards = torch.stack([
-            self.reward_model.predict(
-                self.context, 
-                torch.full((batch_size,), a_idx, dtype=torch.long, device=self.context.device)
-            ).detach() 
-            for a_idx in range(num_actions)
-        ], dim=1) 
-
-        expected_reward = (pi_theta * all_rewards).sum(dim=1)
-
-        return -expected_reward.mean()
+        return policy_gradient_loss
     
 class DRGradient:
     def __init__(self, reward_model, context, actions, behavior_pscore, 
@@ -55,22 +48,25 @@ class DRGradient:
         self.action_context = action_context
 
     def estimate_policy_gradient(self):
-        pi_e = self.target_policy.probs(self.context, self.action_context).detach()
+        pi_e = self.target_policy.probs(self.context, self.action_context)
 
-        target_actions = torch.tensor(
+        sampled_actions = torch.tensor(
             [self.target_policy.sample_action(x_i, self.action_context) for x_i in self.context],
             device=self.context.device
-        )
+        ).detach()
 
-        q_target = self.reward_model.predict(self.context, target_actions)
+        q_target = self.reward_model.predict(self.context, sampled_actions).detach()
+        log_pi_target = self.target_policy.log_prob(self.context, sampled_actions, self.action_context)
+        reinforce = (q_target * log_pi_target).mean()
+
         q_logged = self.reward_model.predict(self.context, self.actions)
-
-        target_pscore = pi_e[torch.arange(len(self.context)), self.actions]
-        weights = (target_pscore / self.behavior_pscore)
+        target_pscore = pi_e[torch.arange(len(self.context)), self.actions].detach()
+        weights = target_pscore / self.behavior_pscore
 
         log_pi_e = self.target_policy.log_prob(self.context, self.actions, self.action_context)
-
-        return -(q_target.mean() + ((weights * (self.rewards - q_logged)).detach() * log_pi_e).mean())
+        dr = (weights * (self.rewards - q_logged.detach()) * log_pi_e).mean()
+        loss = -(reinforce + dr)  
+        return loss
 
 class TwoStageISGradient:
     def __init__(self, policy, context, actions, rewards, 
@@ -117,7 +113,7 @@ class TwoStageISGradient:
 
         # compute weighted loss
         weight = pi_theta2_probs / pi0_valid
-        loss = -weight.detach() * log_pi1_valid * r_valid
+        loss = weight.detach() * log_pi1_valid * r_valid
         return loss.mean()
 
 class KernelISGradient:
