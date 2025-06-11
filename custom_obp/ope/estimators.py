@@ -60,6 +60,10 @@ class TwoStageISEstimator(BaseOffPolicyEstimator):
             probs = self.target_policy.probs_given_topk(x_i, topk.unsqueeze(0))[0]
 
             match_idx = (topk == a_i).nonzero(as_tuple=True)[0]
+
+            if len(match_idx) == 0:
+                continue  # skip if a_i not in A_k
+
             pi2 = probs[match_idx.item()]
 
             values.append((pi2 / pi0_i) * r_i)

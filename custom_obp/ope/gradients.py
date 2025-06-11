@@ -68,52 +68,53 @@ class DRGradient:
         return loss
 
 class TwoStageISGradient:
-    def __init__(self, policy, context, actions, rewards, 
-                 behavior_pscore, candidates):
+    def __init__(self, policy, context, actions, rewards, behavior_pscore, 
+                 candidates=None, action_context=None):
+        super().__init__()
         self.policy = policy
         self.context = context
         self.actions = actions
         self.rewards = rewards
         self.behavior_pscore = behavior_pscore
         self.candidates = candidates
+        self.action_context = action_context
 
     def estimate_policy_gradient(self):
         x = self.context
-        a_taken = self.actions
+        a = self.actions
         r = self.rewards
-        pi0_probs = self.behavior_pscore
-        candidates = self.candidates
+        pi0 = self.behavior_pscore
         device = x.device
 
-        # already sampled k candidates through iterative sampling
-        topk_indices = self.candidates 
+        # if no top-k provided, sample from current policy
+        if self.candidates is None:
+            B = x.shape[0] # constant (batch size)
+            num_items = self.policy.action_context.shape[0]
+            candidate_indices = torch.arange(num_items, device=x.device).repeat(B, 1)
+            topk = self.policy.sample_topk(x, candidate_indices)
+        else:
+            topk = self.candidates
 
-        # get log pi_1(A_k) using policy
-        log_pi1 = self.policy.log_prob_topk_set(x, topk_indices)
+        # compute log pi_1(A_k | x) and pi_2(a | x, A_k)
+        log_pi1 = self.policy.log_prob_topk_set(x, topk)
+        probs_topk = self.policy.probs_given_topk(x, topk)
 
-        # get pi_2(a | x, A_k)
-        probs_topk = self.policy.probs_given_topk(x, topk_indices)
+        match_mask = (topk == a.unsqueeze(1))
+        valid = match_mask.any(dim=1)
 
-        # filter to examples where a ∈ A_k
-        match_mask = (topk_indices == a_taken.unsqueeze(1))
-        action_in_topk = match_mask.any(dim=1)
-
-        if action_in_topk.sum() == 0:
+        if valid.sum() == 0:
             return torch.tensor(0.0, requires_grad=True, device=device)
 
-        idx_valid = match_mask[action_in_topk].float().argmax(dim=1)
-        probs_topk_valid = probs_topk[action_in_topk]
-        pi_theta2_probs = probs_topk_valid[torch.arange(len(idx_valid)), idx_valid]
+        pos = match_mask[valid].float().argmax(dim=1, keepdim=True)
+        pi_theta2 = probs_topk[valid].gather(1, pos).squeeze(1)
 
-        # gather valid values
-        log_pi1_valid = log_pi1[action_in_topk]
-        pi0_valid = pi0_probs[action_in_topk]
-        r_valid = r[action_in_topk]
+        # compute loss
+        log_pi1 = log_pi1[valid]
+        pi0 = pi0[valid]
+        r = r[valid]
 
-        # compute weighted loss
-        weight = pi_theta2_probs / pi0_valid
-        loss = -weight.detach() * log_pi1_valid * r_valid
-        return loss.mean()
+        weight = (pi_theta2 / pi0).detach()
+        return -(weight * r * log_pi1).mean()
 
 class KernelISGradient:
     def __init__(self, context, actions, rewards, target_policy, logging_policy,

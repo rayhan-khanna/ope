@@ -66,7 +66,7 @@ def train(method: str, n_epochs=300, k_users=5, kernel_fn=None):
                 actions=a,
                 rewards=r,
                 behavior_pscore=pi0,
-                candidates=candidates
+                action_context=action_context
             )
             loss = loss_fn.estimate_policy_gradient()
 
@@ -109,13 +109,17 @@ def train(method: str, n_epochs=300, k_users=5, kernel_fn=None):
         if epoch % 10 == 0:
             with torch.no_grad():
                 if method == "single_user_is":
+                    num_items = target_policy.action_context.shape[0]
+                    batch_size = x.shape[0]
+                    candidates = torch.arange(num_items, device=x.device).repeat(batch_size, 1)
+                    topk_eval = target_policy.sample_topk(x, candidates)
                     estimator = TwoStageISEstimator(
                         context=x,
                         actions=a,
                         rewards=r,
                         behavior_pscore=pi0,
                         target_policy=target_policy,
-                        candidates=candidates 
+                        candidates=topk_eval 
                     )
 
                 elif method == "iter_k_is":
