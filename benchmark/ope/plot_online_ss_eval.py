@@ -2,8 +2,8 @@ import torch
 import matplotlib.pyplot as plt
 import numpy as np
 import random
-from synthetic_bandit_dataset import CustomSyntheticBanditDataset
-from action_policies import SoftmaxPolicy
+from obp.dataset.synthetic_bandit_dataset import CustomSyntheticBanditDataset
+from obp.policy.action_policies import SoftmaxPolicy
 
 def set_seed(seed):
     torch.manual_seed(seed)

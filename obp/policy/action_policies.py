@@ -101,12 +101,13 @@ class SoftmaxPolicy(BaseActionPolicy, nn.Module):
         return torch.log(probs[torch.arange(len(context)), actions])
 
 class TwoStageRankingPolicy(BaseActionPolicy, nn.Module):
-    def __init__(self, first_stage_model, second_stage_model, top_k, device="cpu"):
+    def __init__(self, first_stage_model, second_stage_model, top_k, action_context, device="cpu"):
         super().__init__()
         self.first_stage = first_stage_model
         self.second_stage = second_stage_model
         self.top_k = top_k
         self.device = device
+        self.action_context = action_context 
 
     def select_action(self, candidates, context, action_context):
         context = context.unsqueeze(0)
@@ -115,12 +116,11 @@ class TwoStageRankingPolicy(BaseActionPolicy, nn.Module):
         probs = self.second_stage(context, topk.unsqueeze(0))[0]
         return topk[torch.argmax(probs)].item()
 
-    def sample_action(self, context: torch.Tensor, action_context: torch.Tensor):
-        _, topk = self.first_stage(context.unsqueeze(0))
-        probs = self.second_stage(context.unsqueeze(0), topk)
-        action_idx = torch.multinomial(probs[0], 1).item()
-        return topk[0, action_idx].item()
-
+    def sample_action(self, context: torch.Tensor, topk: torch.Tensor):
+        probs = self.second_stage(context.unsqueeze(0), topk.unsqueeze(0))[0]
+        action_idx = torch.multinomial(probs, 1).item()
+        return topk[action_idx].item()
+    
     def log_prob(self, context, actions, action_context):
         if len(context.shape) == 1:
             context = context.unsqueeze(0)
@@ -137,8 +137,11 @@ class TwoStageRankingPolicy(BaseActionPolicy, nn.Module):
         return torch.softmax(logits, dim=1)
 
     def sample_latent(self, context: torch.Tensor):
-        _, topk = self.first_stage(context.unsqueeze(0))
-        return None, topk
+        topk = self.sample_topk(
+            context,
+            torch.arange(self.action_context.shape[0], device=context.device).repeat(context.size(0), 1)
+        )
+        return topk
 
     def sample_topk(self, context: torch.Tensor, candidates: torch.Tensor):
         logits = self._full_logits(context)

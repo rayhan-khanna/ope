@@ -3,10 +3,10 @@ import torch
 import torch.optim as optim
 import torch.nn as nn
 import torch.nn.functional as F
-from gradients import DMGradient, DRGradient, ISGradient
-from estimators import DirectMethodEstimator, DoublyRobustEstimator, ImportanceSamplingEstimator
-from synthetic_bandit_dataset import CustomSyntheticBanditDataset
-from action_policies import UniformRandomPolicy, SoftmaxPolicy
+from obp.ope.gradients import DMGradient, DRGradient, ISGradient
+from obp.ope.estimators import DirectMethodEstimator, DoublyRobustEstimator, ImportanceSamplingEstimator
+from obp.dataset.synthetic_bandit_dataset import CustomSyntheticBanditDataset
+from obp.policy.action_policies import UniformRandomPolicy, SoftmaxPolicy
 
 class RewardModel(nn.Module):
     def __init__(self, dim_context, emb_dim, n_actions):

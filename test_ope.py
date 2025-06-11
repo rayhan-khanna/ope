@@ -2,10 +2,10 @@ import torch
 import torch.optim as optim
 import torch.nn as nn
 import numpy as np
-from synthetic_bandit_dataset import CustomSyntheticBanditDataset
-from action_policies import UniformRandomPolicy, SoftmaxPolicy, TwoStageRankingPolicy
+from obp.dataset.synthetic_bandit_dataset import CustomSyntheticBanditDataset
+from obp.policy.action_policies import UniformRandomPolicy, SoftmaxPolicy, TwoStageRankingPolicy
 from two_stage_bandit import TwoTowerFirstStagePolicy, SoftmaxSecondStagePolicy, ma_et_al_loss
-from estimators import (
+from obp.ope.estimators import (
     ImportanceSamplingEstimator,
     DirectMethodEstimator,
     DoublyRobustEstimator, 

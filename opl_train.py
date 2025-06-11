@@ -1,15 +1,15 @@
 import argparse
 import torch
 import torch.optim as optim
-from two_stage_bandit import (
+from obp.policy.two_stage_policy import (
     TwoTowerFirstStagePolicy,
     SoftmaxSecondStagePolicy,
     mse_loss,
     opl_loss,
     ma_et_al_loss
 )
-from synthetic_bandit_dataset import CustomSyntheticBanditDataset
-from action_policies import UniformRandomPolicy
+from obp.dataset.synthetic_bandit_dataset import CustomSyntheticBanditDataset
+from obp.policy.action_policies import UniformRandomPolicy
 
 def train_model(method: str):
     device = "cpu"

@@ -1,7 +1,7 @@
 import torch
-from action_policies import UniformRandomPolicy, TwoStageRankingPolicy
-from two_stage_bandit import TwoTowerFirstStagePolicy, SoftmaxSecondStagePolicy
-from estimators import (
+from obp.policy.action_policies import UniformRandomPolicy, TwoStageRankingPolicy
+from obp.policy.two_stage_policy import TwoTowerFirstStagePolicy, SoftmaxSecondStagePolicy
+from obp.ope.estimators import (
     ImportanceSamplingEstimator,
     DirectMethodEstimator,
     DoublyRobustEstimator,

@@ -2,9 +2,9 @@ import torch
 import matplotlib.pyplot as plt
 import numpy as np
 import random
-from synthetic_bandit_dataset import CustomSyntheticBanditDataset
-from action_policies import TwoStageRankingPolicy
-from two_stage_bandit import TwoTowerFirstStagePolicy, SoftmaxSecondStagePolicy
+from obp.dataset.synthetic_bandit_dataset import CustomSyntheticBanditDataset
+from obp.policy.action_policies import TwoStageRankingPolicy
+from obp.policy.two_stage_policy import TwoTowerFirstStagePolicy, SoftmaxSecondStagePolicy
 
 def set_seed(seed):
     torch.manual_seed(seed)

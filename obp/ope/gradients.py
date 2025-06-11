@@ -85,8 +85,8 @@ class TwoStageISGradient:
         candidates = self.candidates
         device = x.device
 
-        # sample top-k set using policy's method
-        topk_indices = self.policy.sample_topk(x, candidates)
+        # already sampled k candidates through iterative sampling
+        topk_indices = self.candidates 
 
         # get log pi_1(A_k) using policy
         log_pi1 = self.policy.log_prob_topk_set(x, topk_indices)
@@ -116,34 +116,28 @@ class TwoStageISGradient:
         return loss.mean()
 
 class KernelISGradient:
-    def __init__(self, data, target_policy, logging_policy, kernel, tau, marginal_density_model, action_context, num_epochs=10):
-        """
-        data: list of tuples (x_i, y_i, r_i)
-        target_policy: evaluation policy pi
-        logging_policy: logging policy pi_theta (supports sample_action(x))
-        kernel: function K(y, y', x, tau)
-        tau: temperature for kernel
-        marginal_density_model: model that approximates logging marginal density π₀(y | x)
-        num_epochs: training iterations for h_model
-        """
-        self.data = data
+    def __init__(self, context, actions, rewards, target_policy, logging_policy,
+                 kernel, tau, marginal_density_model, action_context, num_epochs=10, candidates=None):
+        self.context = context
+        self.actions = actions 
+        self.rewards = rewards
         self.target_policy = target_policy
         self.logging_policy = logging_policy
         self.kernel = kernel
         self.tau = tau
         self.marginal_density_model = marginal_density_model
-        self.num_epochs = num_epochs
         self.action_context = action_context
-        # to know if we actually need to train the density model (or if it's just constant)
-        self.train_density_model = any(p.requires_grad for p in marginal_density_model.parameters()) 
+        self.num_epochs = num_epochs
+        self.A_k = candidates
+        self.train_density_model = any(p.requires_grad for p in marginal_density_model.parameters())
 
     def estimateLMD(self):
         """Train h_model to estimate logging marginal density."""
         if not self.train_density_model:
             return
-        optimizer = torch.optim.Adam(self.marginal_density_model.parameters(), lr=1e-3)
+        optimizer = torch.optim.Adam(self.marginal_density_model.parameters())
         for _ in range(self.num_epochs):
-            for x_i, y_i, _ in self.data:
+            for x_i, y_i in zip(self.context, self.actions):
                 optimizer.zero_grad()
                 sampled_action = self.logging_policy.sample_action(x_i, self.action_context)
                 k_val = self.kernel(y_i, sampled_action, x_i, self.tau)
@@ -152,35 +146,28 @@ class KernelISGradient:
                 loss.backward()
                 optimizer.step()
 
-    def _estimate_policy_gradient(self) -> torch.Tensor:
+    def estimate_policy_gradient(self) -> torch.Tensor:
         self.estimateLMD()
 
         x = self.context 
         y_logged = self.actions  
-        r = self.reward
-        B = x.shape[0] # batch size
+        r = self.rewards
+        B = x.shape[0]
 
-        W_k, A_k = self.target_policy.sample_latent(x) 
+        A_k = self.A_k
 
         y_sampled = torch.tensor([
-            self.target_policy.sample_action(x[i], A_k[i], W_k[i]) for i in range(B)
+            self.target_policy.sample_action(x[i], A_k[i]) for i in range(B)
         ], device=x.device)
 
-        # compute kernel(y, y_logged)
         k_val = torch.tensor([
             self.kernel(y_sampled[i], y_logged[i], x[i], self.tau)
             for i in range(B)
         ], device=x.device)
 
-        # estimate logging density h(y_logged | x)
-        pi0_est = self.marginal_density_model.predict(x, y_logged, self.action_context)
-
-        # importance weights
-        is_weight = k_val / pi0_est 
-
-        # log pi_2(A_k) for each context
+        density = self.marginal_density_model.predict(x, y_logged, self.action_context)      
+        is_weight = k_val / density    
         log_pi_theta1_Ak = self.target_policy.log_prob_topk_set(x, A_k)
 
-        # final loss
-        loss = -(is_weight.detach() * r.detach() * log_pi_theta1_Ak).mean()
+        loss = -(is_weight.detach() * r * log_pi_theta1_Ak).mean()
         return loss
