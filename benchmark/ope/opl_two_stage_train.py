@@ -2,11 +2,11 @@ import argparse
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from obp.ope.gradients import TwoStageISGradient, KernelISGradient
-from obp.ope.estimators import ImportanceSamplingEstimator, KernelISEstimator
-from obp.dataset.synthetic_bandit_dataset import CustomSyntheticBanditDataset
-from obp.policy.action_policies import TwoStageRankingPolicy, UniformRandomPolicy
-from obp.policy.two_stage_policy import TwoTowerFirstStagePolicy, SoftmaxSecondStagePolicy
+from custom_obp.ope.gradients import TwoStageISGradient, KernelISGradient
+from custom_obp.ope.estimators import TwoStageISEstimator, KernelISEstimator
+from custom_obp.dataset.synthetic_bandit_dataset import CustomSyntheticBanditDataset
+from custom_obp.policy.action_policies import TwoStageRankingPolicy, UniformRandomPolicy
+from custom_obp.policy.two_stage_policy import TwoTowerFirstStagePolicy, SoftmaxSecondStagePolicy
 
 class ConstantMarginalDensityModel(nn.Module):
     def __init__(self, constant: float = 0.1):
@@ -108,29 +108,41 @@ def train(method: str, n_epochs=300, k_users=5, kernel_fn=None):
 
         if epoch % 10 == 0:
             with torch.no_grad():
-              if method in {"single_user_is", "iter_k_is"}:
-                  # still have to troubleshoot this logic
-                  logits = target_policy.first_stage(x)[0]
-                  topk_idx = logits.topk(target_policy.top_k, dim=1).indices
-                  probs_k  = target_policy.probs_given_topk(x, topk_idx)
-                  mask = (topk_idx == a.unsqueeze(1))                 
-                  selected_p = (probs_k * mask.float()).sum(dim=1)             
-                  estimator = ImportanceSamplingEstimator(pi0, selected_p, r)
-              elif method == "iter_k_kis":
-                estimator = KernelISEstimator(
-                    context=x,
-                    actions=a,
-                    rewards=r,
-                    target_policy=target_policy,
-                    logging_policy=dataset.action_policy,
-                    kernel=kernel_fn,
-                    tau=0.3,
-                    marginal_density_model=density_model,
-                    action_context=action_context
-                )
+                if method == "single_user_is":
+                    estimator = TwoStageISEstimator(
+                        context=x,
+                        actions=a,
+                        rewards=r,
+                        behavior_pscore=pi0,
+                        target_policy=target_policy,
+                        candidates=candidates 
+                    )
+
+                elif method == "iter_k_is":
+                    estimator = TwoStageISEstimator(
+                        context=x_sampled,    
+                        actions=a_sampled,
+                        rewards=r_sampled,
+                        behavior_pscore=pi0_sampled,
+                        target_policy=target_policy,
+                        candidates=cand_sampled 
+                    )
+
+                elif method == "iter_k_kis":
+                    estimator = KernelISEstimator(
+                        context=x_sampled,
+                        actions=a_sampled,
+                        rewards=r_sampled,
+                        target_policy=target_policy,
+                        logging_policy=dataset.action_policy,
+                        kernel=kernel_fn,
+                        tau=0.3,
+                        marginal_density_model=density_model,
+                        action_context=action_context
+                    )
                     
-              policy_value = estimator.estimate_policy_value()
-              print(f"[Epoch {epoch}] Method: {method} | Loss: {loss.item():.4f} | OPE: {policy_value:.4f}")
+                policy_value = estimator.estimate_policy_value()
+                print(f"[Epoch {epoch}] Method: {method} | Loss: {loss.item():.4f} | OPE: {policy_value:.4f}")
     
     torch.save(target_policy.state_dict(), f"{method}_policy.pt")
 

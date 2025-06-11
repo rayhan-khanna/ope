@@ -37,6 +37,40 @@ class ImportanceSamplingEstimator(BaseOffPolicyEstimator):
     def estimate_policy_value_tensor(self) -> torch.Tensor:
         weighted_rewards = self._estimate_round_rewards()
         return weighted_rewards.mean()
+    
+class TwoStageISEstimator(BaseOffPolicyEstimator):
+    def __init__(self, context, actions, rewards, behavior_pscore, target_policy, candidates):
+        self.context = context
+        self.actions = actions
+        self.rewards = rewards
+        self.behavior_pscore = behavior_pscore
+        self.target_policy = target_policy
+        self.candidates = candidates
+
+    def _estimate_round_rewards(self):
+        values = []
+        for i in range(len(self.context)):
+            x_i = self.context[i].unsqueeze(0)
+            a_i = self.actions[i]
+            r_i = self.rewards[i]
+            pi0_i = self.behavior_pscore[i]
+
+            topk = self.candidates[i]
+            x_i = self.context[i].unsqueeze(0)
+            probs = self.target_policy.probs_given_topk(x_i, topk.unsqueeze(0))[0]
+
+            match_idx = (topk == a_i).nonzero(as_tuple=True)[0]
+            pi2 = probs[match_idx.item()]
+
+            values.append((pi2 / pi0_i) * r_i)
+
+        return torch.stack(values)
+
+    def estimate_policy_value(self) -> float:
+        return self._estimate_round_rewards().mean().item()
+
+    def estimate_policy_value_tensor(self) -> torch.Tensor:
+        return self._estimate_round_rewards().mean()
 
 class DirectMethodEstimator(BaseOffPolicyEstimator):
     def __init__(self, reward_model, target_policy, context, action_context):

@@ -1,6 +1,6 @@
 import torch
 from sklearn.utils import check_random_state
-from obp.policy.action_policies import SoftmaxPolicy
+from custom_obp.policy.action_policies import SoftmaxPolicy
 import random
 
 class CustomSyntheticBanditDataset:
