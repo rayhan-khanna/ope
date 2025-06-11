@@ -70,7 +70,6 @@ class DRGradient:
 class TwoStageISGradient:
     def __init__(self, policy, context, actions, rewards, behavior_pscore, 
                  candidates=None, action_context=None):
-        super().__init__()
         self.policy = policy
         self.context = context
         self.actions = actions
