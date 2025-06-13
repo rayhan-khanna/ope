@@ -85,7 +85,6 @@ class TwoStageISGradient:
         pi0 = self.behavior_pscore
         device = x.device
 
-        # if no top-k provided, sample from current policy
         topk = self.candidates
 
         # log pi_1(A_k | x)
