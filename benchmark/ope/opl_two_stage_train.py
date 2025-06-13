@@ -73,6 +73,7 @@ def train(method: str, n_epochs=300, k_users=5, kernel_fn=None):
             )
 
             loss = loss_fn.estimate_policy_gradient()
+            loss.backward()
 
         elif method in {"iter_k_is", "iter_k_kis"}:
             accumulated_loss = 0
@@ -112,8 +113,6 @@ def train(method: str, n_epochs=300, k_users=5, kernel_fn=None):
                 loss.backward()
                 accumulated_loss += loss.item()
 
-
-        #loss.backward()
         optimizer.step()
 
         if epoch % 10 == 0:
