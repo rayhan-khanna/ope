@@ -2,9 +2,8 @@ import torch
 import matplotlib.pyplot as plt
 import numpy as np
 import random
-from obp.dataset.synthetic_bandit_dataset import CustomSyntheticBanditDataset
-from obp.policy.action_policies import TwoStageRankingPolicy
-from obp.policy.two_stage_policy import TwoTowerFirstStagePolicy, SoftmaxSecondStagePolicy
+from custom_obp.dataset.synthetic_bandit_dataset import CustomSyntheticBanditDataset
+from custom_obp.policy.two_stage_policy import TwoTowerFirstStagePolicy, SoftmaxSecondStagePolicy
 
 def set_seed(seed):
     torch.manual_seed(seed)
@@ -26,19 +25,31 @@ def online_eval_once(policy_path: str, seed: int) -> float:
         single_stage=False
     )
 
-    first_stage = TwoTowerFirstStagePolicy(input_dim=5, hidden_dim=64, n_actions=10)
-    second_stage = SoftmaxSecondStagePolicy(context_dim=5, k=5)
-    policy = TwoStageRankingPolicy(first_stage, second_stage, top_k=5, device=device)
-    policy.load_state_dict(torch.load(policy_path))
+    # instantiate models
+    first_stage = TwoTowerFirstStagePolicy(
+        dim_context=5,
+        num_items=10,
+        emb_dim=64,
+        top_k=5
+    )
+    second_stage = SoftmaxSecondStagePolicy(
+        dim_context=5,
+        emb_dim=64,
+        first_stage_policy=first_stage
+    )
 
+    # load weights
+    state_dicts = torch.load(policy_path)
+    first_stage.load_state_dict(state_dicts["first_stage"])
+    second_stage.load_state_dict(state_dicts["second_stage"])
+
+    # evaluate
     x_test = dataset.sample_context(10000)
-    actions = torch.tensor([
-        policy.sample_action(x_i, dataset.action_context)
-        for x_i in x_test
-    ], device=device)
+    candidates = first_stage.sample_topk(x_test)
+    actions = second_stage.sample_output(x_test, candidates)
 
-    r = dataset.reward_function(x_test, actions)
-    return r.mean().item()
+    rewards = dataset.reward_function(x_test, actions)
+    return rewards.mean().item()
 
 def evaluate_over_seeds(method: str, seeds=[0, 1, 2, 3, 4]):
     path = f"{method}_policy.pt"

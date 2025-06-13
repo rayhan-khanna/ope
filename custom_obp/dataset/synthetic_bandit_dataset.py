@@ -1,7 +1,6 @@
 import torch
 from sklearn.utils import check_random_state
 from custom_obp.policy.action_policies import SoftmaxPolicy
-import random
 
 class CustomSyntheticBanditDataset:
     """Generates synthetic bandit feedback dataset."""
@@ -71,52 +70,38 @@ class CustomSyntheticBanditDataset:
                 "rewards": rewards
             }
         
-    def sample_k_user_batch_from_feedback(self, feedback, k_users, target_policy):
+    def sample_k_user_batch_from_feedback(self, feedback, k_users):
         x_all = feedback["context"]
         a_all = feedback["action"]
         r_all = feedback["reward"]
         pi0_all = feedback["pscore"]
-        candidates = feedback["candidates"]
+        candidates_all = feedback["candidates"]
 
-        valid_samples = []
-
-        # shuffle indices for random sampling
-        indices = list(range(len(x_all)))
-        random.shuffle(indices)
+        indices = torch.randperm(len(x_all))
+        selected = []
 
         for idx in indices:
-            x_i = x_all[idx].unsqueeze(0) 
-            a_i = a_all[idx]
-
-            # gets top-k from current policy
-            topk = target_policy.sample_topk(x_i, candidates[idx].unsqueeze(0))[0]
-            if (topk == a_i).any():
-                valid_samples.append((
-                    x_all[idx],
-                    a_all[idx],
-                    r_all[idx],
-                    pi0_all[idx],
-                    topk
-                ))
-
-            # if all k sampled, break
-            if len(valid_samples) == k_users:
+            if (candidates_all[idx] == a_all[idx]).any():
+                selected.append(idx)
+            if len(selected) == k_users:
                 break
-
-        x_batch, a_batch, r_batch, pi0_batch, topk_batch = zip(*valid_samples)
-
+        
+        selected = torch.tensor(selected, dtype=torch.long)
         return {
-            "context": torch.stack(x_batch),
-            "action": torch.stack(a_batch),
-            "reward": torch.stack(r_batch),
-            "pscore": torch.stack(pi0_batch),
-            "candidates": torch.stack(topk_batch)
+            "context": x_all[selected],
+            "action": a_all[selected],
+            "reward": r_all[selected],
+            "pscore": pi0_all[selected],
+            "candidates": candidates_all[selected]
         }
 
     def candidate_selection(self, context):
-        """Select top-K candidates based on inner product search."""
-        scores = torch.matmul(context, self.action_context.T)  # inner product
-        top_k_indices = torch.topk(scores, self.top_k, dim=1).indices
+        """Select top-K candidates based on inner product search, with Gumbel 
+        noise."""
+        scores = torch.matmul(context, self.action_context.T)
+        gumbel_noise = -torch.log(-torch.log(torch.rand_like(scores)))
+        noisy_scores = scores + gumbel_noise
+        top_k_indices = torch.topk(noisy_scores, self.top_k, dim=1).indices
         return top_k_indices
 
     def sample_policy(self, candidates, context):

@@ -37,44 +37,6 @@ class ImportanceSamplingEstimator(BaseOffPolicyEstimator):
     def estimate_policy_value_tensor(self) -> torch.Tensor:
         weighted_rewards = self._estimate_round_rewards()
         return weighted_rewards.mean()
-    
-class TwoStageISEstimator(BaseOffPolicyEstimator):
-    def __init__(self, context, actions, rewards, behavior_pscore, target_policy, candidates):
-        self.context = context
-        self.actions = actions
-        self.rewards = rewards
-        self.behavior_pscore = behavior_pscore
-        self.target_policy = target_policy
-        self.candidates = candidates
-
-    def _estimate_round_rewards(self):
-        values = []
-        for i in range(len(self.context)):
-            x_i = self.context[i].unsqueeze(0)
-            a_i = self.actions[i]
-            r_i = self.rewards[i]
-            pi0_i = self.behavior_pscore[i]
-
-            topk = self.candidates[i]
-            x_i = self.context[i].unsqueeze(0)
-            probs = self.target_policy.probs_given_topk(x_i, topk.unsqueeze(0))[0]
-
-            match_idx = (topk == a_i).nonzero(as_tuple=True)[0]
-
-            if len(match_idx) == 0:
-                continue  # skip if a_i not in A_k
-
-            pi2 = probs[match_idx.item()]
-
-            values.append((pi2 / pi0_i) * r_i)
-
-        return torch.stack(values)
-
-    def estimate_policy_value(self) -> float:
-        return self._estimate_round_rewards().mean().item()
-
-    def estimate_policy_value_tensor(self) -> torch.Tensor:
-        return self._estimate_round_rewards().mean()
 
 class DirectMethodEstimator(BaseOffPolicyEstimator):
     def __init__(self, reward_model, target_policy, context, action_context):
@@ -139,31 +101,64 @@ class DoublyRobustEstimator(BaseOffPolicyEstimator):
         dr_reward = self._estimate_dr_rewards()
         return dr_reward.mean()
 
-class KernelISEstimator(BaseOffPolicyEstimator):
-    def __init__(self, context, actions, rewards, target_policy, logging_policy,
-                 kernel, tau, marginal_density_model, action_context, num_epochs=10):
-        """
-        context: tensor of x_i
-        actions: tensor of y_i
-        rewards: tensor of r_i
-        target_policy: evaluation policy π
-        logging_policy: logging policy π₀
-        kernel: function K(y, y', x, tau)
-        tau: temperature for kernel
-        marginal_density_model: model approximating π₀(y | x)
-        action_context: all action feature vectors
-        num_epochs: optional training epochs for h_model
-        """
+
+### Two-stage estimators ###
+    
+class TwoStageISEstimator(BaseOffPolicyEstimator):
+    def __init__(self, context, actions, rewards, behavior_pscore,
+                 first_stage_policy, second_stage_policy, candidates):
         self.context = context
         self.actions = actions
         self.rewards = rewards
-        self.target_policy = target_policy
+        self.behavior_pscore = behavior_pscore
+        self.first_stage = first_stage_policy
+        self.second_stage = second_stage_policy
+        self.candidates = candidates
+
+    def _estimate_round_rewards(self):
+        values = []
+        for i in range(len(self.context)):
+            x_i = self.context[i].unsqueeze(0)
+            a_i = self.actions[i]
+            r_i = self.rewards[i]
+            pi0_i = self.behavior_pscore[i]
+
+            topk = self.candidates[i]
+            probs = self.second_stage.calc_prob_given_output(x_i, topk.unsqueeze(0))[0]
+
+            match_idx = (topk == a_i).nonzero(as_tuple=True)[0]
+
+            if len(match_idx) == 0:
+                continue  # skip if a_i not in A_k
+
+            pi2 = probs[match_idx.item()]
+
+            values.append((pi2 / pi0_i) * r_i)
+
+        return torch.stack(values)
+
+    def estimate_policy_value(self) -> float:
+        return self._estimate_round_rewards().mean().item()
+
+    def estimate_policy_value_tensor(self) -> torch.Tensor:
+        return self._estimate_round_rewards().mean()
+    
+class KernelISEstimator(BaseOffPolicyEstimator):
+    def __init__(self, context, actions, rewards, first_stage, second_stage,
+                 logging_policy, kernel, tau, marginal_density_model, action_context, 
+                 candidates, num_epochs=10):
+        self.context = context
+        self.actions = actions
+        self.rewards = rewards
+        self.first_stage = first_stage 
+        self.second_stage = second_stage 
         self.logging_policy = logging_policy
         self.kernel = kernel
         self.tau = tau
         self.marginal_density_model = marginal_density_model
         self.action_context = action_context
         self.num_epochs = num_epochs
+        self.candidates = candidates
         self.train_density_model = any(p.requires_grad for p in marginal_density_model.parameters())
 
     def estimateLMD(self):
@@ -179,21 +174,26 @@ class KernelISEstimator(BaseOffPolicyEstimator):
                 loss = (predicted_density - k_val) ** 2
                 loss.backward()
                 optimizer.step()
-
+    
     def kernel_is_value_estimate(self):
-        values = []
-        A_k = self.target_policy.sample_latent(self.context)
+        x = self.context
+        y_log = self.actions
+        r = self.rewards
+        B = x.size(0)
+
+        topk = self.candidates
 
         y_prime = torch.tensor([
-            self.target_policy.sample_action(self.context[i], A_k[i])
-            for i in range(len(self.context))
-        ], device=self.context.device)
+            self.second_stage.sample_output(x[i].unsqueeze(0), topk[i].unsqueeze(0)).item()
+            for i in range(B)
+        ], device=x.device)
 
-        for x_i, y_i, y_prime_i, r_i in zip(self.context, self.actions, y_prime, self.rewards):
-            k_val = self.kernel(y_prime_i, y_i, x_i, self.tau)
-            density = self.marginal_density_model.predict(x_i, y_i, self.action_context)
+        values = []
+        for i in range(B):
+            k_val = self.kernel(y_prime[i], y_log[i], x[i], self.tau)
+            density = self.marginal_density_model.predict(x[i], y_log[i], self.action_context)
             is_weight = k_val / density
-            values.append(is_weight * r_i)
+            values.append(is_weight * r[i])
 
         return torch.stack(values).mean()
 

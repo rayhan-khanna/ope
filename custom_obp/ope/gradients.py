@@ -68,15 +68,15 @@ class DRGradient:
         return loss
 
 class TwoStageISGradient:
-    def __init__(self, policy, context, actions, rewards, behavior_pscore, 
-                 candidates=None, action_context=None):
-        self.policy = policy
+    def __init__(self, first_stage, second_stage, context, actions, rewards,
+                 behavior_pscore, candidates):
+        self.first_stage = first_stage
+        self.second_stage = second_stage
         self.context = context
         self.actions = actions
         self.rewards = rewards
         self.behavior_pscore = behavior_pscore
         self.candidates = candidates
-        self.action_context = action_context
 
     def estimate_policy_gradient(self):
         x = self.context
@@ -86,17 +86,13 @@ class TwoStageISGradient:
         device = x.device
 
         # if no top-k provided, sample from current policy
-        if self.candidates is None:
-            B = x.shape[0] # constant (batch size)
-            num_items = self.policy.action_context.shape[0]
-            candidate_indices = torch.arange(num_items, device=x.device).repeat(B, 1)
-            topk = self.policy.sample_topk(x, candidate_indices)
-        else:
-            topk = self.candidates
+        topk = self.candidates
 
-        # compute log pi_1(A_k | x) and pi_2(a | x, A_k)
-        log_pi1 = self.policy.log_prob_topk_set(x, topk)
-        probs_topk = self.policy.probs_given_topk(x, topk)
+        # log pi_1(A_k | x)
+        log_pi1 = self.first_stage.log_prob_topk_set(x, topk)
+
+        # pi_2(a | x, A_k)
+        probs_topk = self.second_stage.calc_prob_given_output(x, topk)
 
         match_mask = (topk == a.unsqueeze(1))
         valid = match_mask.any(dim=1)
@@ -112,23 +108,24 @@ class TwoStageISGradient:
         pi0 = pi0[valid]
         r = r[valid]
 
-        weight = (pi_theta2 / pi0).detach()
+        weight = torch.clamp((pi_theta2 / pi0), max=10).detach()
         return -(weight * r * log_pi1).mean()
 
 class KernelISGradient:
-    def __init__(self, context, actions, rewards, target_policy, logging_policy,
-                 kernel, tau, marginal_density_model, action_context, num_epochs=10, candidates=None):
+    def __init__(self, first_stage, second_stage, context, actions, rewards, logging_policy,
+                 kernel, tau, marginal_density_model, action_context, candidates, num_epochs=10):
+        self.first_stage = first_stage
+        self.second_stage = second_stage
         self.context = context
         self.actions = actions 
         self.rewards = rewards
-        self.target_policy = target_policy
         self.logging_policy = logging_policy
         self.kernel = kernel
         self.tau = tau
         self.marginal_density_model = marginal_density_model
         self.action_context = action_context
         self.num_epochs = num_epochs
-        self.A_k = candidates
+        self.candidates = candidates
         self.train_density_model = any(p.requires_grad for p in marginal_density_model.parameters())
 
     def estimateLMD(self):
@@ -152,13 +149,15 @@ class KernelISGradient:
         x = self.context 
         y_logged = self.actions  
         r = self.rewards
+        topk = self.candidates
         B = x.shape[0] # batch size
 
-        A_k = self.A_k
-
         y_sampled = torch.tensor([
-            self.target_policy.sample_action(x[i], A_k[i]) for i in range(B)
+            self.second_stage.sample_output(x[i].unsqueeze(0), topk[i].unsqueeze(0)).item()
+            for i in range(B)
         ], device=x.device)
+
+        log_pi1 = self.first_stage.log_prob_topk_set(x, topk)
 
         k_val = torch.tensor([
             self.kernel(y_sampled[i], y_logged[i], x[i], self.tau)
@@ -167,7 +166,6 @@ class KernelISGradient:
 
         density = self.marginal_density_model.predict(x, y_logged, self.action_context)      
         is_weight = k_val / density    
-        log_pi_theta1_Ak = self.target_policy.log_prob_topk_set(x, A_k)
 
-        loss = -(is_weight.detach() * r * log_pi_theta1_Ak).mean()
+        loss = -(is_weight.detach() * r * log_pi1).mean()
         return loss
