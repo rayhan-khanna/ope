@@ -65,7 +65,7 @@ def train(method: str, n_epochs=300, kernel_fn=None):
             a_valid = a[valid]
             r_valid = r[valid]
             c_valid = resampled_candidates[valid]
-            pi0_valid = torch.full_like(a_valid, 1.0 / first_stage.top_k, dtype=torch.float32)
+            pi0_valid = torch.full_like(a_valid, 1.0 / dataset.n_actions, dtype=torch.float32)
 
             loss_fn = TwoStageISGradient(
                 first_stage=first_stage,
@@ -92,7 +92,7 @@ def train(method: str, n_epochs=300, kernel_fn=None):
             r_valid = r_sampled[valid]
             c_valid = resampled_candidates[valid]
 
-            pi0_valid = torch.full_like(a_valid, 1.0 / first_stage.top_k, dtype=torch.float32)
+            pi0_valid = torch.full_like(a_valid, 1.0 / dataset.n_actions, dtype=torch.float32)
 
             if method == "iter_k_is":
                 loss_fn = TwoStageISGradient(
@@ -134,7 +134,7 @@ def train(method: str, n_epochs=300, kernel_fn=None):
                     a_valid = a[valid]
                     r_valid = r[valid]
                     c_valid = eval_candidates[valid]
-                    pi0_valid = torch.full_like(a_valid, 1.0 / first_stage.top_k, dtype=torch.float32)
+                    pi0_valid = torch.full_like(a_valid, 1.0 / dataset.n_actions, dtype=torch.float32)
 
                     estimator = TwoStageISEstimator(
                         context=x_valid,
@@ -155,7 +155,7 @@ def train(method: str, n_epochs=300, kernel_fn=None):
                     a_valid = a_sampled[valid]
                     r_valid = r_sampled[valid]
                     c_valid = eval_candidates[valid]
-                    pi0_valid = torch.full_like(a_valid, 1.0 / first_stage.top_k, dtype=torch.float32)
+                    pi0_valid = torch.full_like(a_valid, 1.0 / dataset.n_actions, dtype=torch.float32)
 
                     estimator = TwoStageISEstimator(
                         context=x_valid,    
