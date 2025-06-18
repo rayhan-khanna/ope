@@ -1,3 +1,4 @@
+import os
 import torch
 import matplotlib.pyplot as plt
 import numpy as np
@@ -76,7 +77,9 @@ def main():
     for i, v in enumerate(means):
         plt.text(i, v + stds[i] + 0.02, f"{v:.3f} ± {stds[i]:.3f}", ha='center')
     plt.tight_layout()
-    plt.savefig("two_stage_eval_seeds.png")
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    save_path = os.path.join(script_dir, "two_stage_eval_seeds.png")
+    plt.savefig(save_path)
     plt.show()
 
 if __name__ == "__main__":
