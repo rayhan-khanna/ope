@@ -12,8 +12,8 @@ class ISGradient:
     def estimate_policy_gradient(self):
         pi_theta = self.target_policy.probs(self.context, self.action_context)
         target_pscore = pi_theta[torch.arange(len(self.context)), self.actions]
-        weight = target_pscore / self.behavior_pscore
-        weighted_rewards = self.rewards * weight.detach()
+        weight = torch.clamp(target_pscore / self.behavior_pscore, max=10).detach()
+        weighted_rewards = self.rewards * weight
         log_pi_theta = self.target_policy.log_prob(self.context, self.actions, self.action_context)
         loss = -(weighted_rewards * log_pi_theta).mean()
         return loss

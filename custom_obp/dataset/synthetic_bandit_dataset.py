@@ -69,30 +69,32 @@ class CustomSyntheticBanditDataset:
                 "actions": actions,
                 "rewards": rewards
             }
-        
-    def sample_k_user_batch_from_feedback(self, feedback, k_users):
+    
+    def sample_k_prefs(self, feedback, n_pref_per_user):        
         x_all = feedback["context"]
         a_all = feedback["action"]
         r_all = feedback["reward"]
         pi0_all = feedback["pscore"]
-        candidates_all = feedback["candidates"]
+        user_ids = feedback["user_id"]
 
-        indices = torch.randperm(len(x_all))
-        selected = []
+        selected_indices = []
 
-        for idx in indices:
-            if (candidates_all[idx] == a_all[idx]).any():
-                selected.append(idx)
-            if len(selected) == k_users:
-                break
-        
-        selected = torch.tensor(selected, dtype=torch.long)
+        for user_id in torch.unique(user_ids):
+            user_mask = user_ids == user_id
+            user_indices = torch.nonzero(user_mask, as_tuple=False).squeeze()
+
+            if len(user_indices) >= n_pref_per_user:
+                chosen = user_indices[torch.randperm(len(user_indices))[:n_pref_per_user]]
+                selected_indices.append(chosen)
+
+        selected_indices = torch.cat(selected_indices)
+
         return {
-            "context": x_all[selected],
-            "action": a_all[selected],
-            "reward": r_all[selected],
-            "pscore": pi0_all[selected],
-            "candidates": candidates_all[selected]
+            "context": x_all[selected_indices],
+            "action": a_all[selected_indices],
+            "reward": r_all[selected_indices],
+            "pscore": pi0_all[selected_indices],
+            "user_id": user_ids[selected_indices]
         }
 
     def candidate_selection(self, context):
@@ -121,7 +123,7 @@ class CustomSyntheticBanditDataset:
         noise = torch.randn_like(mean_reward) * self.reward_std
         return (mean_reward + noise).to(self.device)
 
-    def obtain_batch_bandit_feedback(self, n_samples):
+    def obtain_batch_bandit_feedback(self, n_samples, n_users):
         """Obtain structured logged bandit feedback."""
         
         context = torch.tensor(
@@ -129,6 +131,8 @@ class CustomSyntheticBanditDataset:
         ).to(self.device)
         data = self.generate_data(context)
 
+        user_ids = torch.arange(n_users, device=self.device).repeat(n_samples // n_users + 1)[:n_samples]
+        user_ids = user_ids[torch.randperm(n_samples)]
         
         if self.single_stage:
             pi_b_logits = torch.randn(n_samples, self.n_actions).to(self.device)
@@ -137,6 +141,7 @@ class CustomSyntheticBanditDataset:
 
             return {
                 "n_samples": n_samples,
+                "user_id": user_ids, 
                 "context": data["context"],
                 "action": data["actions"],
                 "reward": data["rewards"],
@@ -166,6 +171,7 @@ class CustomSyntheticBanditDataset:
 
             return {
                 "n_samples": n_samples,
+                "user_id": user_ids, 
                 "context": data["context"],
                 "candidates": data["candidates"],
                 "action": data["actions"],

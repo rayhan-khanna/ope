@@ -23,6 +23,11 @@ class TwoTowerFirstStagePolicy(nn.Module):
         item_embs = self.item_embeddings.weight
         return torch.matmul(context, item_embs.T)
     
+    def sample_topk(self, x):
+        logits = self.full_logits(x)
+        topk_indices = torch.topk(logits, self.top_k, dim=1).indices
+        return topk_indices
+
     def sample_topk_gumbel(self, x, return_prob=False):
         logits = self.full_logits(x)
         gumbel_noise = -torch.log(-torch.log(torch.rand_like(logits)))

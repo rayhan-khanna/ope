@@ -3,10 +3,10 @@ import torch
 import torch.optim as optim
 import torch.nn as nn
 import torch.nn.functional as F
-from obp.ope.gradients import DMGradient, DRGradient, ISGradient
-from obp.ope.estimators import DirectMethodEstimator, DoublyRobustEstimator, ImportanceSamplingEstimator
-from obp.dataset.synthetic_bandit_dataset import CustomSyntheticBanditDataset
-from obp.policy.action_policies import UniformRandomPolicy, SoftmaxPolicy
+from custom_obp.ope.gradients import DMGradient, DRGradient, ISGradient
+from custom_obp.ope.estimators import DirectMethodEstimator, DoublyRobustEstimator, ImportanceSamplingEstimator
+from custom_obp.dataset.synthetic_bandit_dataset import CustomSyntheticBanditDataset
+from custom_obp.policy.action_policies import UniformRandomPolicy, SoftmaxPolicy
 
 class RewardModel(nn.Module):
     def __init__(self, dim_context, emb_dim, n_actions):
@@ -33,12 +33,12 @@ def train_model(method: str):
     dataset = CustomSyntheticBanditDataset(
         n_actions=10,
         dim_context=5,
-        top_k=5,
+        top_k=1,
         action_policy=UniformRandomPolicy(),
         reward_std=0.5,
         device=device
     )
-    bandit_feedback = dataset.obtain_batch_bandit_feedback(n_samples=10000)
+    bandit_feedback = dataset.obtain_batch_bandit_feedback(n_samples=10000, n_users=1000)
     x = bandit_feedback["context"]
     a_taken = bandit_feedback["action"]
     r = bandit_feedback["reward"]
