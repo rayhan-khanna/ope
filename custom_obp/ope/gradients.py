@@ -89,7 +89,7 @@ class TwoStageISGradient:
 
         # log pi_1(A_k | x)
         log_pi1 = self.first_stage.log_prob_topk_set(x, topk)
-
+        
         # pi_2(a | x, A_k)
         probs_topk = self.second_stage.calc_prob_given_output(x, topk)
 

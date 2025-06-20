@@ -101,7 +101,6 @@ class DoublyRobustEstimator(BaseOffPolicyEstimator):
         dr_reward = self._estimate_dr_rewards()
         return dr_reward.mean()
 
-
 ### Two-stage estimators ###
     
 class TwoStageISEstimator(BaseOffPolicyEstimator):

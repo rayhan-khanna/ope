@@ -7,6 +7,7 @@ from custom_obp.ope.estimators import TwoStageISEstimator, KernelISEstimator
 from custom_obp.dataset.synthetic_bandit_dataset import CustomSyntheticBanditDataset
 from custom_obp.policy.action_policies import UniformRandomPolicy
 from custom_obp.policy.two_stage_policy import TwoTowerFirstStagePolicy, SoftmaxSecondStagePolicy
+from custom_obp.models.cf_model import NaiveCF
 
 class ConstantMarginalDensityModel(nn.Module):
     def __init__(self, constant: float = 0.1):
@@ -30,8 +31,28 @@ def train(method: str, n_epochs=300, kernel_fn=None):
     x = feedback["context"]
     a = feedback["action"]
     r = feedback["reward"]
-    # pi0 = feedback["pscore"]
+    u = feedback["user_id"]
     action_context = dataset.action_context
+
+    if method == "naive_cf":
+        model = NaiveCF(n_users=dataset.n_users, n_items=dataset.n_actions, emb_dim=32)
+        optimizer = optim.Adam(model.parameters())
+        loss_fn = nn.MSELoss()
+
+        for epoch in range(n_epochs):
+            optimizer.zero_grad()
+            preds = model(u, a)
+            loss = loss_fn(preds, r)
+            loss.backward()
+            optimizer.step()
+
+            if epoch % 10 == 0:
+                with torch.no_grad():
+                    mse = ((model(u, a) - r) ** 2).mean()
+                    print(f"[Epoch {epoch}] Method: {method} | Loss: {loss.item():.4f} | MSE: {mse.item():.4f}")
+
+        torch.save(model.state_dict(), f"{method}_policy.pt")
+        return
 
     if kernel_fn is None and method == "iter_k_kis":
         kernel_fn = lambda y, y_i, x, tau: torch.exp(
@@ -66,7 +87,7 @@ def train(method: str, n_epochs=300, kernel_fn=None):
             r_valid = r[valid]
             c_valid = resampled_candidates[valid]
             pi0_valid = torch.full_like(a_valid, 1.0 / dataset.n_actions, dtype=torch.float32)
-
+            
             loss_fn = TwoStageISGradient(
                 first_stage=first_stage,
                 second_stage=second_stage,
@@ -120,6 +141,7 @@ def train(method: str, n_epochs=300, kernel_fn=None):
                 )
                 
         loss = loss_fn.estimate_policy_gradient()
+
         loss.backward()
         optimizer.step()
 
@@ -196,13 +218,15 @@ def train(method: str, n_epochs=300, kernel_fn=None):
     
     torch.save({
         "first_stage": first_stage.state_dict(),
-        "second_stage": second_stage.state_dict()
+        "second_stage": second_stage.state_dict(),
+        "action_context": dataset.action_context
     }, f"{method}_policy.pt")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--method", type=str, required=True,
-                        choices=["single_preference_is", "iter_k_is", "iter_k_kis"])
+                        choices=["single_preference_is", "iter_k_is",
+                                  "iter_k_kis", "naive_cf"])
     args = parser.parse_args()
 
     train(method=args.method)

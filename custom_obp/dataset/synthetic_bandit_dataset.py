@@ -126,17 +126,28 @@ class CustomSyntheticBanditDataset:
     def obtain_batch_bandit_feedback(self, n_samples, n_users):
         """Obtain structured logged bandit feedback."""
         
-        context = torch.tensor(
-            self.random_.normal(size=(n_samples, self.dim_context)), dtype=torch.float32
-        ).to(self.device)
-        data = self.generate_data(context)
+        self.n_users = n_users
 
+        # Create per-user context embedding
+        user_embeddings = torch.tensor(
+            self.random_.normal(size=(n_users, self.dim_context)), dtype=torch.float32
+        ).to(self.device)
+
+        # Generate user IDs
         user_ids = torch.arange(n_users, device=self.device).repeat(n_samples // n_users + 1)[:n_samples]
         user_ids = user_ids[torch.randperm(n_samples)]
+
+        # Context is now the embedding for that user
+        context = user_embeddings[user_ids]
+
+        data = self.generate_data(context)
         
         if self.single_stage:
-            pi_b_logits = torch.randn(n_samples, self.n_actions).to(self.device)
-            pi_b = torch.softmax(pi_b_logits, dim=1)
+            pi_b = torch.stack([
+                self.action_policy.probs(context[i], self.action_context)
+                for i in range(n_samples)
+            ]).to(self.device)
+
             pscore = pi_b[torch.arange(n_samples), data["actions"]]
 
             return {
@@ -158,10 +169,10 @@ class CustomSyntheticBanditDataset:
                 )
 
             # compute policy probabilities
-            pi_b_logits = torch.tensor(
-                self.random_.normal(size=data["candidates"].shape), dtype=torch.float32
-            ).to(self.device)
-            pi_b = torch.exp(pi_b_logits) / torch.sum(torch.exp(pi_b_logits), dim=1, keepdim=True)
+            pi_b = torch.stack([
+                self.action_policy.probs(context[i], self.action_context[data["candidates"][i]])
+                for i in range(n_samples)
+            ]).to(self.device)
 
             # get probability of chosen action
             chosen_prob = torch.tensor([
