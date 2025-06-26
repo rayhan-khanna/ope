@@ -2,6 +2,8 @@ import argparse
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import numpy as np
+import random
 from custom_obp.ope.gradients import TwoStageISGradient, KernelISGradient
 from custom_obp.ope.estimators import TwoStageISEstimator, KernelISEstimator
 from custom_obp.dataset.synthetic_bandit_dataset import CustomSyntheticBanditDataset
@@ -17,16 +19,26 @@ class ConstantMarginalDensityModel(nn.Module):
     def predict(self, x, a_idx, action_context):
         return self.value
     
-def train(method: str, n_epochs=300, kernel_fn=None):
+def train(method, n_epochs=300, kernel_fn=None, seed=None):
+    if seed is not None:
+        torch.manual_seed(seed)
+        np.random.seed(seed)
+        random.seed(seed)
     device = "cpu"
 
     # create dataset
     dataset = CustomSyntheticBanditDataset(
         n_actions=10, dim_context=5, top_k=5, 
         reward_std=0.5, action_policy=UniformRandomPolicy(), device=device, 
-        single_stage=False
+        single_stage=(method=="naive_cf")
     )
-    feedback = dataset.obtain_batch_bandit_feedback(n_samples=10000, n_users=1000)
+
+    feedback = dataset.obtain_batch_bandit_feedback(n_samples=100000, n_users=1000)
+
+    if method in {"random", "oracle"}:
+        torch.save(feedback["user_id"], f"{method}_eval_user_ids.pt")
+        torch.save(dataset.user_embeddings, f"{method}_user_embeddings.pt")
+        return
 
     x = feedback["context"]
     a = feedback["action"]
@@ -35,29 +47,83 @@ def train(method: str, n_epochs=300, kernel_fn=None):
     action_context = dataset.action_context
 
     if method == "naive_cf":
-        model = NaiveCF(n_users=dataset.n_users, n_items=dataset.n_actions, emb_dim=32)
+        model = NaiveCF(dim_context=dataset.dim_context, n_items=dataset.n_actions, emb_dim=32)
         optimizer = optim.Adam(model.parameters())
         loss_fn = nn.MSELoss()
-
         for epoch in range(n_epochs):
             optimizer.zero_grad()
-            preds = model(u, a)
+            preds = model(x, a)
             loss = loss_fn(preds, r)
             loss.backward()
             optimizer.step()
 
             if epoch % 10 == 0:
                 with torch.no_grad():
-                    mse = ((model(u, a) - r) ** 2).mean()
+                    mse = ((model(x, a) - r) ** 2).mean()
                     print(f"[Epoch {epoch}] Method: {method} | Loss: {loss.item():.4f} | MSE: {mse.item():.4f}")
 
-        torch.save(model.state_dict(), f"{method}_policy.pt")
+        torch.save(model.state_dict(), f"{method}_policy_seed{seed}.pt")
+        torch.save(dataset.user_embeddings, f"{method}_user_embeddings.pt")
+        torch.save(dataset.action_context, f"{method}_action_context.pt")
         return
-
-    if kernel_fn is None and method == "iter_k_kis":
-        kernel_fn = lambda y, y_i, x, tau: torch.exp(
-            -torch.norm(action_context[y] - action_context[y_i]) ** 2 / (2 * tau ** 2)
+    
+    elif method == "online_policy":
+        first_stage = TwoTowerFirstStagePolicy(
+            dim_context=5,
+            num_items=dataset.n_actions,
+            emb_dim=64,
+            top_k=5
         )
+        second_stage = SoftmaxSecondStagePolicy(
+            dim_context=5,
+            emb_dim=64,
+            first_stage_policy=first_stage
+        )
+
+        optimizer = optim.Adam(list(first_stage.parameters()) + list(second_stage.parameters()))
+
+        n_steps = 10000
+        print_interval = 500
+        rewards = []
+
+        for step in range(n_steps):
+            i = torch.randint(0, len(x), (1,)).item()
+
+            context = x[i].unsqueeze(0)
+            user_id = u[i].unsqueeze(0)
+
+            candidates = first_stage.sample_topk_gumbel(context)
+            sampled_idx = second_stage.sample_output(context, candidates)
+            action_id = candidates[0, sampled_idx.item()]
+            action_tensor = torch.tensor([action_id], dtype=torch.long)
+
+            reward = dataset.reward_function(user_id, action_tensor)
+
+            log_prob = second_stage.log_prob(context, action_tensor, dataset.action_context, A_k=candidates)
+            loss = -reward.detach() * log_prob
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+            rewards.append(reward.item())
+
+            if (step + 1) % print_interval == 0:
+                avg_reward = sum(rewards[-print_interval:]) / print_interval
+                print(f"[Step {step + 1}] Method: online_policy | Avg Reward: {avg_reward:.4f}")
+
+        # save learned policy
+        torch.save({
+            "first_stage": first_stage.state_dict(),
+            "second_stage": second_stage.state_dict(),
+            "action_context": dataset.action_context
+        }, f"{method}_policy_seed{seed}.pt")
+
+        torch.save(feedback["context"], f"{method}_eval_context.pt")
+        torch.save(feedback["user_id"], f"{method}_eval_user_ids.pt")
+        torch.save(dataset.user_embeddings, f"{method}_user_embeddings.pt")
+        torch.save(dataset.action_context, f"{method}_action_context.pt")
+        return
 
     first_stage = TwoTowerFirstStagePolicy(
         dim_context=5,
@@ -71,35 +137,30 @@ def train(method: str, n_epochs=300, kernel_fn=None):
         first_stage_policy=first_stage
     )
 
+    if kernel_fn is None and "kis" in method:
+        with torch.no_grad():
+            # use item embeddings to compute bandwidth
+            emb = first_stage.item_embeddings.weights
+            idx = torch.randint(0, emb.size(0), (1000,))
+            tau = torch.cdist(emb[idx], emb[idx]).median().item() 
+
+        def kernel_fn(y, y_i, _x, tau=tau):
+            vec_y = first_stage.item_embeddings(y)
+            vec_yi = first_stage.item_embeddings(y_i)
+            return torch.exp(-((vec_y - vec_yi).pow(2).sum(dim=-1)) / (2 * tau**2))
+
     optimizer = optim.Adam(first_stage.parameters())
     density_model = ConstantMarginalDensityModel()
 
     for epoch in range(n_epochs):
         optimizer.zero_grad()
-        
-        if method == "single_preference_is":
-            resampled_candidates = first_stage.sample_topk_gumbel(x)
-            match = (resampled_candidates == a.unsqueeze(1))
-            valid = match.any(dim=1)
 
-            x_valid = x[valid]
-            a_valid = a[valid]
-            r_valid = r[valid]
-            c_valid = resampled_candidates[valid]
-            pi0_valid = torch.full_like(a_valid, 1.0 / dataset.n_actions, dtype=torch.float32)
-            
-            loss_fn = TwoStageISGradient(
-                first_stage=first_stage,
-                second_stage=second_stage,
-                context=x_valid,
-                actions=a_valid,
-                rewards=r_valid,
-                behavior_pscore=pi0_valid,
-                candidates=c_valid,
-            )
-
-        elif method in {"iter_k_is", "iter_k_kis"}:
-            n_pref_per_user = 1
+        if method in {"single_preference_is", "single_preference_kis", "iter_k_is", "iter_k_kis"}:
+            if method in ["single_preference_is", "single_preference_kis"]: 
+                n_pref_per_user = 1
+            else: 
+                n_pref_per_user = 5
+                
             sampled_data = dataset.sample_k_prefs(feedback, n_pref_per_user)
             x_sampled = sampled_data["context"]
             a_sampled = sampled_data["action"]
@@ -115,7 +176,7 @@ def train(method: str, n_epochs=300, kernel_fn=None):
 
             pi0_valid = torch.full_like(a_valid, 1.0 / dataset.n_actions, dtype=torch.float32)
 
-            if method == "iter_k_is":
+            if method != "iter_k_kis":
                 loss_fn = TwoStageISGradient(
                     first_stage=first_stage,
                     second_stage=second_stage,
@@ -134,7 +195,7 @@ def train(method: str, n_epochs=300, kernel_fn=None):
                     second_stage=second_stage,  
                     logging_policy=dataset.action_policy,
                     kernel=kernel_fn,
-                    tau=0.1,
+                    tau=tau,
                     marginal_density_model=density_model,
                     action_context=action_context,
                     candidates=c_valid
@@ -147,14 +208,18 @@ def train(method: str, n_epochs=300, kernel_fn=None):
 
         if epoch % 10 == 0:
             with torch.no_grad():
-                if method == "single_preference_is":
-                    eval_candidates = first_stage.sample_topk_gumbel(x)
-                    match = (eval_candidates == a.unsqueeze(1))
+                if method in {"single_preference_is", "iter_k_is"}:
+                    eval_context = x_sampled
+                    eval_action = a_sampled
+                    eval_reward = r_sampled
+
+                    eval_candidates = first_stage.sample_topk_gumbel(eval_context)
+                    match = (eval_candidates == eval_action.unsqueeze(1))
                     valid = match.any(dim=1)
 
-                    x_valid = x[valid]
-                    a_valid = a[valid]
-                    r_valid = r[valid]
+                    x_valid = eval_context[valid]
+                    a_valid = eval_action[valid]
+                    r_valid = eval_reward[valid]
                     c_valid = eval_candidates[valid]
                     pi0_valid = torch.full_like(a_valid, 1.0 / dataset.n_actions, dtype=torch.float32)
 
@@ -167,29 +232,8 @@ def train(method: str, n_epochs=300, kernel_fn=None):
                         second_stage_policy=second_stage,
                         candidates=c_valid
                     )
-                    
-                elif method == "iter_k_is":
-                    eval_candidates = first_stage.sample_topk_gumbel(x_sampled)
-                    match = (eval_candidates == a_sampled.unsqueeze(1))
-                    valid = match.any(dim=1)
 
-                    x_valid = x_sampled[valid]
-                    a_valid = a_sampled[valid]
-                    r_valid = r_sampled[valid]
-                    c_valid = eval_candidates[valid]
-                    pi0_valid = torch.full_like(a_valid, 1.0 / dataset.n_actions, dtype=torch.float32)
-
-                    estimator = TwoStageISEstimator(
-                        context=x_valid,    
-                        actions=a_valid,
-                        rewards=r_valid,
-                        behavior_pscore=pi0_valid,
-                        first_stage_policy=first_stage,
-                        second_stage_policy=second_stage,
-                        candidates=c_valid 
-                    )
-
-                elif method == "iter_k_kis":
+                elif method in {"single_preference_kis", "iter_k_kis"}:
                     eval_candidates = first_stage.sample_topk_gumbel(x_sampled)
                     match = (eval_candidates == a_sampled.unsqueeze(1))
                     valid = match.any(dim=1)
@@ -207,7 +251,7 @@ def train(method: str, n_epochs=300, kernel_fn=None):
                         second_stage=second_stage,
                         logging_policy=dataset.action_policy,
                         kernel=kernel_fn,
-                        tau=0.1,
+                        tau=tau,
                         marginal_density_model=density_model,
                         action_context=action_context,
                         candidates=c_valid
@@ -220,13 +264,18 @@ def train(method: str, n_epochs=300, kernel_fn=None):
         "first_stage": first_stage.state_dict(),
         "second_stage": second_stage.state_dict(),
         "action_context": dataset.action_context
-    }, f"{method}_policy.pt")
+    }, f"{method}_policy_seed{seed}.pt")
+    torch.save(dataset.action_context, f"{method}_action_context.pt")
+    torch.save(x, f"{method}_eval_context.pt")
+    torch.save(u, f"{method}_eval_user_ids.pt")
+    torch.save(dataset.user_embeddings, f"{method}_user_embeddings.pt")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--method", type=str, required=True,
-                        choices=["single_preference_is", "iter_k_is",
-                                  "iter_k_kis", "naive_cf"])
+                        choices=["single_preference_is", "single_preference_kis", 
+                                 "iter_k_is", "iter_k_kis", "naive_cf", 
+                                 "online_policy", "random"])
     args = parser.parse_args()
 
     train(method=args.method)

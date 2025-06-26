@@ -38,6 +38,7 @@ def train_model(method: str):
         reward_std=0.5,
         device=device
     )
+
     bandit_feedback = dataset.obtain_batch_bandit_feedback(n_samples=10000, n_users=1000)
     x = bandit_feedback["context"]
     a_taken = bandit_feedback["action"]

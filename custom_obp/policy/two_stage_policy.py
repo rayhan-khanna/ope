@@ -93,3 +93,18 @@ class SoftmaxSecondStagePolicy(nn.Module):
 
         probs = torch.softmax(scores, dim=1)
         return probs
+    
+    def log_prob(self, x, a_idx, action_context, A_k=None):
+        if A_k is None:
+            raise ValueError("Must provide candidate set A_k")
+
+        # compute probs over A_k
+        probs = self.calc_prob_given_output(x, A_k)
+        
+        # get index of a_idx within A_k
+        index_in_A_k = (A_k == a_idx.unsqueeze(1)).nonzero(as_tuple=True)
+
+        if len(index_in_A_k[0]) != a_idx.shape[0]:
+            raise ValueError("Some actions not in top-k candidate set.")
+
+        return torch.log(probs[index_in_A_k])
