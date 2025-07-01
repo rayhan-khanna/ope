@@ -182,19 +182,15 @@ class KernelISEstimator(BaseOffPolicyEstimator):
 
         topk = self.candidates
 
-        y_prime = torch.tensor([
-            self.second_stage.sample_output(x[i].unsqueeze(0), topk[i].unsqueeze(0)).item()
-            for i in range(B)
-        ], device=x.device)
+        sampled_idx = self.second_stage.sample_output(x, topk)
+        y_prime = topk[torch.arange(B, device=x.device), sampled_idx]
 
         values = []
-        for i in range(B):
-            k_val = self.kernel(y_prime[i], y_log[i], x[i], self.tau)
-            density = self.marginal_density_model.predict(x[i], y_log[i], self.action_context)
-            is_weight = k_val / density
-            values.append(is_weight * r[i])
-
-        return torch.stack(values).mean()
+        k_val = self.kernel(y_prime, y_log, x, self.tau)
+        density = self.marginal_density_model.predict(x, y_log, self.action_context)
+        is_weight = (k_val / density).clamp(max=10)
+        values = is_weight * r
+        return values.mean()
 
     def estimate_policy_value(self) -> float:
         return self.estimate_policy_value_tensor().item()

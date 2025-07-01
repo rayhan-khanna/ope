@@ -93,19 +93,16 @@ class TwoStageISGradient:
         # pi_2(a | x, A_k)
         probs_topk = self.second_stage.calc_prob_given_output(x, topk)
 
-        match_mask = (topk == a.unsqueeze(1))
-        valid = match_mask.any(dim=1)
+        index_in_topk = (topk == a.unsqueeze(1)).nonzero(as_tuple=True)
+        valid_mask = torch.zeros(len(a), dtype=torch.bool, device=device)
+        valid_mask[index_in_topk[0]] = True
 
-        if valid.sum() == 0:
-            return torch.tensor(0.0, requires_grad=True, device=device)
-
-        pos = match_mask[valid].float().argmax(dim=1, keepdim=True)
-        pi_theta2 = probs_topk[valid].gather(1, pos).squeeze(1)
+        pi_theta2 = probs_topk[index_in_topk]
 
         # compute loss
-        log_pi1 = log_pi1[valid]
-        pi0 = pi0[valid]
-        r = r[valid]
+        log_pi1 = log_pi1[valid_mask]
+        pi0 = pi0[valid_mask]
+        r = r[valid_mask]
 
         weight = torch.clamp((pi_theta2 / pi0), max=10).detach()
         return -(weight * r * log_pi1).mean()
@@ -149,22 +146,17 @@ class KernelISGradient:
         y_logged = self.actions  
         r = self.rewards
         topk = self.candidates
-        B = x.shape[0] # batch size
+        B = x.shape[0]
 
-        y_sampled = torch.tensor([
-            self.second_stage.sample_output(x[i].unsqueeze(0), topk[i].unsqueeze(0)).item()
-            for i in range(B)
-        ], device=x.device)
+        sampled_idx = self.second_stage.sample_output(x, topk)
+        y_sampled = topk[torch.arange(B, device=x.device), sampled_idx]
 
         log_pi1 = self.first_stage.log_prob_topk_set(x, topk)
 
-        k_val = torch.tensor([
-            self.kernel(y_sampled[i], y_logged[i], x[i], self.tau)
-            for i in range(B)
-        ], device=x.device)
-
+        k_val = self.kernel(y_sampled, y_logged, x, self.tau)
+        
         density = self.marginal_density_model.predict(x, y_logged, self.action_context)      
-        is_weight = k_val / density    
+        is_weight = (k_val / density).clamp(max=10)
 
         loss = -(is_weight.detach() * r * log_pi1).mean()
         return loss

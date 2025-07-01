@@ -4,6 +4,8 @@ import numpy as np
 import random
 from custom_obp.dataset.synthetic_bandit_dataset import CustomSyntheticBanditDataset
 from custom_obp.policy.action_policies import SoftmaxPolicy
+from opl_two_stage_train import train
+from online_eval import online_eval_once
 
 def set_seed(seed):
     torch.manual_seed(seed)
@@ -36,13 +38,15 @@ def online_eval_once(policy_path: str, seed: int) -> float:
     r_true = dataset.reward_function(x_test, a_sampled)
     return r_true.mean().item()
 
-def evaluate_over_seeds(method: str, seeds=[0,1,2,3,4]):
-    path = f"{method}_policy.pt"
-    scores = [online_eval_once(path, seed) for seed in seeds]
+def evaluate_over_seeds(method: str, seeds=[0, 1, 2, 3, 4]):
+    scores = []
+    for seed in seeds:
+        print(f"[Seed {seed}] Evaluating {method}")
+        scores.append(online_eval_once(method, seed))
     return np.mean(scores), np.std(scores)
 
 def main():
-    methods = ["dm", "dr", "is"]
+    methods = ["single_preference_is", "single_preference_kis", "iter_k_is", "iter_k_kis", "naive_cf", "online_policy", "random"]
     means, stds = [], []
 
     for method in methods:
@@ -54,7 +58,7 @@ def main():
     # Plot
     plt.figure(figsize=(6, 4))
     plt.bar(methods, means, yerr=stds, capsize=5)
-    plt.title("Online Evaluation over 5 Random Seeds")
+    plt.title("Online Evaluation over 5 Seeds")
     plt.ylabel("Average Reward")
     plt.xlabel("Method")
     plt.ylim(0, max(means) + max(stds) + 0.2)

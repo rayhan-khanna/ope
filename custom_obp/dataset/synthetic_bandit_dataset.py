@@ -114,11 +114,7 @@ class CustomSyntheticBanditDataset:
     def sample_policy(self, candidates, context):
         """Use the provided policy to select an action."""
         return torch.tensor([
-            self.action_policy.select_action(
-                candidates[i].cpu().numpy(), 
-                context[i].cpu().numpy(), 
-                self.action_context.cpu().numpy()
-            )
+            self.action_policy.select_action(candidates[i], context[i], self.action_context)
             for i in range(candidates.shape[0])
         ], dtype=torch.long).to(self.device)
     
@@ -158,7 +154,7 @@ class CustomSyntheticBanditDataset:
             pi_b = torch.stack([
                 self.action_policy.probs(context[i], self.action_context)
                 for i in range(n_samples)
-            ])
+            ]).to(self.device)
             pscore = pi_b[torch.arange(n_samples), data["action"]]
 
             return {
@@ -181,7 +177,7 @@ class CustomSyntheticBanditDataset:
                 self.action_context[data["candidates"][i]]
             )
             for i in range(n_samples)
-        ])
+        ]).to(self.device)
 
         # match sampled action to index in candidate set
         chosen_prob = torch.tensor([

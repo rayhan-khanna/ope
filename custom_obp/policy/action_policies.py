@@ -29,19 +29,19 @@ class BaseActionPolicy(ABC):
 
 class UniformRandomPolicy(BaseActionPolicy):
     def select_action(self, candidates, context, action_context):
-        idx = torch.randint(0, len(candidates), (1,)).item()
+        idx = torch.randint(0, len(candidates), (1,), device=action_context.device).item()
         return candidates[idx].item()
 
     def sample_action(self, context, action_context):
-        return torch.randint(0, len(action_context), (1,)).item()
+        return torch.randint(0, len(action_context), (1,), device=action_context.device).item()
 
     def log_prob(self, context, action, action_context):
         prob = 1.0 / action_context.size(0)
-        return torch.log(torch.tensor(prob, dtype=torch.float32))
+        return torch.log(torch.tensor(prob, dtype=torch.float32, device=action_context.device))
 
     def probs(self, context, action_context):
         n = action_context.size(0)
-        return torch.ones(n, dtype=torch.float32) / n
+        return torch.ones(n, dtype=torch.float32, device=action_context.device) / n
 
 
 class EpsilonGreedyPolicy(BaseActionPolicy):
@@ -66,7 +66,7 @@ class EpsilonGreedyPolicy(BaseActionPolicy):
         greedy_action = torch.argmax(scores).item()
         n = action_context.size(0)
         prob = (1 - self.epsilon) + self.epsilon / n if action == greedy_action else self.epsilon / n
-        return torch.log(torch.tensor(prob, dtype=torch.float32))
+        return torch.log(torch.tensor(prob, dtype=torch.float32, device=action_context.device))
 
     def probs(self, context, action_context):
         scores = torch.matmul(action_context, context)
