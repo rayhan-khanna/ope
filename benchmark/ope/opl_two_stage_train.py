@@ -20,7 +20,7 @@ class ConstantMarginalDensityModel(nn.Module):
     def predict(self, x, a_idx, action_context):
         return self.value
     
-def train(method, n_epochs=1000, kernel_fn=None, seed=0):
+def train(method, n_epochs=300, kernel_fn=None, seed=0):
     if seed is not None:
         torch.manual_seed(seed)
         np.random.seed(seed)
@@ -147,13 +147,7 @@ def train(method, n_epochs=1000, kernel_fn=None, seed=0):
     density_model = ConstantMarginalDensityModel().to(device)
     n_steps_per_epoch = 10
 
-    tau = 1.0
-
-    def compute_tau():
-        with torch.no_grad():
-            emb = first_stage.item_embeddings.weight.detach().to(device)
-            idx = torch.randint(0, emb.size(0), (1000,))
-            return torch.cdist(emb[idx], emb[idx]).median().item()
+    tau = 4.2
 
     def kernel_fn(y, y_i, _x, tau):
         vec_y = first_stage.item_embeddings(y)
@@ -161,13 +155,11 @@ def train(method, n_epochs=1000, kernel_fn=None, seed=0):
         return torch.exp(-((vec_y - vec_yi).pow(2).sum(dim=-1)) / (2 * tau**2))
 
     for epoch in range(n_epochs):
-        if epoch % 50 == 0:
-            tau = compute_tau()
 
         for _ in range(n_steps_per_epoch):
             optimizer.zero_grad()
 
-            if method in {"single_preference_is", "single_preference_kis", "iter_k_is", "iter_k_kis"}:
+            if method in {"single_preference_is", "single_preference_kis", "multimodal_preference_is", "multimodal_preference_kis"}:
                 if method in ["single_preference_is", "single_preference_kis"]: 
                     n_pref_per_user = 1
                 else: 
@@ -178,6 +170,14 @@ def train(method, n_epochs=1000, kernel_fn=None, seed=0):
                 a_sampled = sampled_data["action"].to(device)
                 r_sampled = sampled_data["reward"].to(device)
                 resampled_candidates = first_stage.sample_topk_gumbel(x_sampled)
+
+                with torch.no_grad():
+                    logged_emb = first_stage.item_embeddings(a_sampled)
+                    cand_emb  = first_stage.item_embeddings(resampled_candidates)
+                    dists = torch.cdist(logged_emb.unsqueeze(1), cand_emb, p=2)
+                    min_dists = dists.min(dim=2).values.squeeze(1)
+                    avg_min_dist = min_dists.mean().item()
+
                 match = (resampled_candidates == a_sampled.unsqueeze(1))
                 valid = match.any(dim=1)
 
@@ -188,7 +188,7 @@ def train(method, n_epochs=1000, kernel_fn=None, seed=0):
 
                 pi0_valid = torch.full_like(a_valid, 1.0 / dataset.n_actions, dtype=torch.float32).to(device)
 
-                if method != "iter_k_kis":
+                if method != "multimodal_preference_kis":
                     loss_fn = TwoStageISGradient(
                         first_stage=first_stage,
                         second_stage=second_stage,
@@ -227,7 +227,7 @@ def train(method, n_epochs=1000, kernel_fn=None, seed=0):
                     "action_context": dataset.action_context
                 }, f"{method}_policy_seed{seed}.pt")
 
-                if method in {"single_preference_is", "iter_k_is"}:
+                if method in {"single_preference_is", "multimodal_preference_is"}:
                     eval_context = x_sampled
                     eval_action = a_sampled
                     eval_reward = r_sampled
@@ -252,7 +252,7 @@ def train(method, n_epochs=1000, kernel_fn=None, seed=0):
                         candidates=c_valid
                     )
 
-                elif method in {"single_preference_kis", "iter_k_kis"}:
+                elif method in {"single_preference_kis", "multimodal_preference_kis"}:
                     eval_candidates = first_stage.sample_topk_gumbel(x_sampled)
                     match = (eval_candidates == a_sampled.unsqueeze(1))
                     valid = match.any(dim=1)
@@ -278,7 +278,8 @@ def train(method, n_epochs=1000, kernel_fn=None, seed=0):
 
                 policy_value = estimator.estimate_policy_value()
                 online_value = online_eval_once(method=method, seed=seed)
-                print(f"[Epoch {epoch}] Method: {method} | Loss: {loss.item():.4f} | OPE: {policy_value:.4f} | Online: {online_value:.4f}")
+                print(f"[Epoch {epoch}] Method: {method} | Loss: {loss.item():.4f} | OPE: {policy_value:.4f} | Online: {online_value:.4f} | AvgDist: {avg_min_dist:.4f}")
+                # print(f"[Epoch {epoch}] Method: {method} | Loss: {loss.item():.4f} | OPE: {policy_value:.4f} | Online: {online_value:.4f}")
 
     torch.save(dataset.action_context, f"{method}_action_context.pt")
     torch.save(x, f"{method}_eval_context.pt")
@@ -290,7 +291,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--method", type=str, required=True,
                         choices=["single_preference_is", "single_preference_kis", 
-                                 "iter_k_is", "iter_k_kis", "naive_cf", 
+                                 "multimodal_preference_is", "multimodal_preference_kis", "naive_cf", 
                                  "online_policy", "random", "oracle"])
     args = parser.parse_args()
 

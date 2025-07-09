@@ -22,7 +22,7 @@ def evaluate_over_seeds(method: str, seeds=[0, 1, 2, 3, 4]):
 
 def main():
     methods = [
-        "single_preference_is", "single_preference_kis", "iter_k_is", "iter_k_kis",
+        "single_preference_is", "single_preference_kis", "multimodal_preference_is", "multimodal_preference_kis",
         "naive_cf", "online_policy", "random", "oracle"]
     means, stds = [], []
 

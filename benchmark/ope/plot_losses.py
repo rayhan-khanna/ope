@@ -4,8 +4,8 @@ from opl_two_stage_train import train
 methods = [
     "single_preference_is", 
     "single_preference_kis", 
-    "iter_k_is", 
-    "iter_k_kis", 
+    "multimodal_preference_is", 
+    "multimodal_preference_kis", 
     "naive_cf", 
     "online_policy"
 ]

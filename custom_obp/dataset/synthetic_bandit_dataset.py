@@ -93,13 +93,13 @@ class CustomSyntheticBanditDataset:
                 selected_indices.append(chosen)
 
         selected_indices = torch.cat(selected_indices)
-
+        device = selected_indices.device
         return {
-            "context": x_all[selected_indices],
-            "action": a_all[selected_indices],
-            "reward": r_all[selected_indices],
-            "pscore": pi0_all[selected_indices],
-            "user_id": user_ids[selected_indices]
+            "context": x_all[selected_indices].to(device),
+            "action": a_all[selected_indices].to(device),
+            "reward": r_all[selected_indices].to(device),
+            "pscore": pi0_all[selected_indices].to(device),
+            "user_id": user_ids[selected_indices].to(device)
         }
 
     def candidate_selection(self, context):

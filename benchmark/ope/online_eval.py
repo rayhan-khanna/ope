@@ -12,7 +12,7 @@ def set_seed(seed):
 
 def online_eval_once(method: str, seed: int) -> float:
     set_seed(seed)
-    device = "cpu"
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     dataset = CustomSyntheticBanditDataset(
         n_actions=10,
@@ -24,7 +24,7 @@ def online_eval_once(method: str, seed: int) -> float:
         single_stage=(method == "naive_cf")
     )
 
-    dataset.user_embeddings = dataset.sample_context(1000)
+    dataset.user_embeddings = dataset.sample_context(1000).to(device)
     user_ids = torch.randint(0, 1000, size=(10000,), device=device)
     x_test = dataset.user_embeddings[user_ids] 
 
@@ -64,8 +64,13 @@ def online_eval_once(method: str, seed: int) -> float:
             first_stage_policy=first_stage
         )
 
-        state_dicts = torch.load(f"{method}_policy_seed{seed}.pt")
-        dataset.action_context = state_dicts["action_context"]
+        state_dicts = torch.load(f"{method}_policy_seed{seed}.pt", map_location=device)
+
+        dataset.action_context = state_dicts["action_context"].to(device)
+
+        first_stage = first_stage.to(device)
+        second_stage = second_stage.to(device)
+
         first_stage.load_state_dict(state_dicts["first_stage"])
         second_stage.load_state_dict(state_dicts["second_stage"])
 

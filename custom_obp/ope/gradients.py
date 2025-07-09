@@ -130,14 +130,14 @@ class KernelISGradient:
             return
         optimizer = torch.optim.Adam(self.marginal_density_model.parameters())
         for _ in range(self.num_epochs):
-            for x_i, y_i in zip(self.context, self.actions):
-                optimizer.zero_grad()
-                sampled_action = self.logging_policy.sample_action(x_i, self.action_context)
-                k_val = self.kernel(y_i, sampled_action, x_i, self.tau)
-                predicted_density = self.marginal_density_model.predict(x_i, y_i, self.action_context)
-                loss = (predicted_density - k_val) ** 2
-                loss.backward()
-                optimizer.step()
+            x = self.context
+            y = self.actions
+            sampled_y = self.logging_policy.sample_action(x, self.action_context)
+            k_val = self.kernel(y, sampled_y, x, self.tau)
+            pred_density = self.marginal_density_model.predict(x, y, self.action_context)
+            loss = ((pred_density - k_val) ** 2).mean()
+            loss.backward()
+            optimizer.step()
 
     def estimate_policy_gradient(self) -> torch.Tensor:
         self.estimateLMD()

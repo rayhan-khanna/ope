@@ -115,26 +115,16 @@ class TwoStageISEstimator(BaseOffPolicyEstimator):
         self.candidates = candidates
 
     def _estimate_round_rewards(self):
-        values = []
-        for i in range(len(self.context)):
-            x_i = self.context[i].unsqueeze(0)
-            a_i = self.actions[i]
-            r_i = self.rewards[i]
-            pi0_i = self.behavior_pscore[i]
+        probs = self.second_stage.calc_prob_given_output(self.context, self.candidates)
+        match = (self.candidates == self.actions.unsqueeze(1))
+        valid = match.any(dim=1)
 
-            topk = self.candidates[i]
-            probs = self.second_stage.calc_prob_given_output(x_i, topk.unsqueeze(0))[0]
+        pi2 = probs[match]
+        r_valid = self.rewards[valid]
+        pi0_valid = self.behavior_pscore[valid]
 
-            match_idx = (topk == a_i).nonzero(as_tuple=True)[0]
-
-            if len(match_idx) == 0:
-                continue  # skip if a_i not in A_k
-
-            pi2 = probs[match_idx.item()]
-
-            values.append((pi2 / pi0_i) * r_i)
-
-        return torch.stack(values)
+        values = (pi2 / pi0_valid) * r_valid
+        return values
 
     def estimate_policy_value(self) -> float:
         return self._estimate_round_rewards().mean().item()
@@ -163,16 +153,16 @@ class KernelISEstimator(BaseOffPolicyEstimator):
     def estimateLMD(self):
         if not self.train_density_model:
             return
-        optimizer = torch.optim.Adam(self.marginal_density_model.parameters(), lr=1e-3)
+        optimizer = torch.optim.Adam(self.marginal_density_model.parameters())
         for _ in range(self.num_epochs):
-            for x_i, y_i in zip(self.context, self.actions):
-                optimizer.zero_grad()
-                sampled_action = self.logging_policy.sample_action(x_i, self.action_context)
-                k_val = self.kernel(y_i, sampled_action, x_i, self.tau)
-                predicted_density = self.marginal_density_model.predict(x_i, y_i, self.action_context)
-                loss = (predicted_density - k_val) ** 2
-                loss.backward()
-                optimizer.step()
+            x = self.context
+            y = self.actions
+            sampled_y = self.logging_policy.sample_action(x, self.action_context)
+            k_val = self.kernel(y, sampled_y, x, self.tau)
+            pred_density = self.marginal_density_model.predict(x, y, self.action_context)
+            loss = ((pred_density - k_val) ** 2).mean()
+            loss.backward()
+            optimizer.step()
     
     def kernel_is_value_estimate(self):
         x = self.context
@@ -185,7 +175,6 @@ class KernelISEstimator(BaseOffPolicyEstimator):
         sampled_idx = self.second_stage.sample_output(x, topk)
         y_prime = topk[torch.arange(B, device=x.device), sampled_idx]
 
-        values = []
         k_val = self.kernel(y_prime, y_log, x, self.tau)
         density = self.marginal_density_model.predict(x, y_log, self.action_context)
         is_weight = (k_val / density).clamp(max=10)
