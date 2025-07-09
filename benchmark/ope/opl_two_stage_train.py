@@ -71,7 +71,7 @@ def train(method, n_epochs=300, kernel_fn=None, seed=0):
         torch.save(dataset.user_embeddings, f"{method}_user_embeddings.pt")
         torch.save(dataset.action_context, f"{method}_action_context.pt")
         return losses
-    
+
     elif method == "online_policy":
         first_stage = TwoTowerFirstStagePolicy(
             dim_context=5,
@@ -85,38 +85,40 @@ def train(method, n_epochs=300, kernel_fn=None, seed=0):
             first_stage_policy=first_stage
         ).to(device)
 
-        optimizer = optim.Adam(list(first_stage.parameters()) + list(second_stage.parameters()))
+        optimizer = optim.Adam(list(first_stage.parameters()) + list(second_stage.parameters()), lr=1e-3)
 
-        n_steps = 10000
-        print_interval = 500
+        n_epochs = 300
+        n_steps_per_epoch = 10
+        batch_size = 3000
+        print_interval = 10
+
+        losses = []
         rewards = []
 
-        for step in range(n_steps):
-            i = torch.randint(0, len(x), (1,)).item()
+        for epoch in range(n_epochs):
+            for _ in range(n_steps_per_epoch):
+                indices = torch.randint(0, len(x), (batch_size,))
+                context = x[indices]
+                user_ids = u[indices]
 
-            context = x[i].unsqueeze(0)
-            user_id = u[i].unsqueeze(0)
+                candidates = first_stage.sample_topk_gumbel(context)
+                sampled_indices = second_stage.sample_output(context, candidates)
+                action_ids = candidates[torch.arange(batch_size), sampled_indices]
 
-            candidates = first_stage.sample_topk_gumbel(context)
-            sampled_idx = second_stage.sample_output(context, candidates)
-            action_id = candidates[0, sampled_idx.item()]
-            action_tensor = torch.tensor([action_id], dtype=torch.long, device=device)
+                reward = dataset.reward_function(user_ids, action_ids)
+                log_prob = second_stage.log_prob(context, action_ids, dataset.action_context, A_k=candidates)
+                loss = - (reward.detach() * log_prob).mean()
 
-            reward = dataset.reward_function(user_id, action_tensor)
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
 
-            log_prob = second_stage.log_prob(context, action_tensor, dataset.action_context, A_k=candidates)
-            loss = -reward.detach() * log_prob
+                losses.append(loss.item())
+                rewards.extend(reward.tolist())
 
-            optimizer.zero_grad()
-            loss.backward()
-            losses.append(loss.item())
-            optimizer.step()
-
-            rewards.append(reward.item())
-
-            if (step + 1) % print_interval == 0:
-                avg_reward = sum(rewards[-print_interval:]) / print_interval
-                print(f"[Step {step + 1}] Method: online_policy | Avg Reward: {avg_reward:.4f}")
+            if (epoch + 1) % print_interval == 0:
+                avg_reward = np.mean(rewards[-print_interval * n_steps_per_epoch * batch_size:])
+                print(f"[Epoch {epoch + 1}] Method: online_policy | Avg Reward: {avg_reward:.4f}")
 
         # save learned policy
         torch.save({
@@ -155,7 +157,6 @@ def train(method, n_epochs=300, kernel_fn=None, seed=0):
         return torch.exp(-((vec_y - vec_yi).pow(2).sum(dim=-1)) / (2 * tau**2))
 
     for epoch in range(n_epochs):
-
         for _ in range(n_steps_per_epoch):
             optimizer.zero_grad()
 
