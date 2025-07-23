@@ -32,7 +32,7 @@ def train(method, n_epochs=300, kernel_fn=None, seed=0):
 
     # create dataset
     dataset = CustomSyntheticBanditDataset(
-        n_actions=10, dim_context=5, top_k=5, 
+        n_actions=1000, dim_context=5, top_k=10, 
         reward_std=0.5, action_policy=UniformRandomPolicy(), device=device, 
         single_stage=(method=="naive_cf")
     )
@@ -77,7 +77,7 @@ def train(method, n_epochs=300, kernel_fn=None, seed=0):
             dim_context=5,
             num_items=dataset.n_actions,
             emb_dim=64,
-            top_k=5
+            top_k=10
         ).to(device)
         second_stage = SoftmaxSecondStagePolicy(
             dim_context=5,
@@ -87,57 +87,67 @@ def train(method, n_epochs=300, kernel_fn=None, seed=0):
 
         optimizer = optim.Adam(list(first_stage.parameters()) + list(second_stage.parameters()), lr=1e-3)
 
-        n_epochs = 300
+        n_epochs = 1500
         n_steps_per_epoch = 10
         batch_size = 3000
         print_interval = 10
+        entropy_coeff = 0.03
+        max_grad_norm = 1.0
 
         losses = []
         rewards = []
+        epoch_losses = []
+        step_losses = []
 
         for epoch in range(n_epochs):
             for _ in range(n_steps_per_epoch):
                 indices = torch.randint(0, len(x), (batch_size,))
                 context = x[indices]
                 user_ids = u[indices]
-
                 candidates = first_stage.sample_topk_gumbel(context)
-                sampled_indices = second_stage.sample_output(context, candidates)
-                action_ids = candidates[torch.arange(batch_size), sampled_indices]
-
-                reward = dataset.reward_function(user_ids, action_ids)
-                log_prob = second_stage.log_prob(context, action_ids, dataset.action_context, A_k=candidates)
-                loss = - (reward.detach() * log_prob).mean()
-
+                ranked_actions, _ = second_stage.rank_outputs(context, candidates)
+                top1_actions = ranked_actions[:, 0]
+                reward = dataset.reward_function(user_ids, top1_actions)
+                log_prob = second_stage.log_prob(context, top1_actions, dataset.action_context, A_k=candidates)
+                loss = -(reward.detach() * log_prob).mean()
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
 
                 losses.append(loss.item())
+                step_losses.append(loss.item())
                 rewards.extend(reward.tolist())
+                avg_epoch_loss = np.mean(step_losses)
+                epoch_losses.append(avg_epoch_loss)
 
             if (epoch + 1) % print_interval == 0:
                 avg_reward = np.mean(rewards[-print_interval * n_steps_per_epoch * batch_size:])
-                print(f"[Epoch {epoch + 1}] Method: online_policy | Avg Reward: {avg_reward:.4f}")
+                torch.save({
+                    "first_stage": first_stage.state_dict(),
+                    "second_stage": second_stage.state_dict(),
+                    "action_context": dataset.action_context
+                }, f"{method}_policy_seed{seed}.pt")
+                online_value = online_eval_once(method=method, seed=seed)
+                print(f"[Epoch {epoch + 1}] Method: online_policy | Online: {online_value:.4f} | Avg Reward: {avg_reward:.4f} | Avg Loss: {avg_epoch_loss:.4f}")
 
-        # save learned policy
+
         torch.save({
             "first_stage": first_stage.state_dict(),
             "second_stage": second_stage.state_dict(),
             "action_context": dataset.action_context
-        }, f"{method}_policy_seed{seed}.pt")
+    	}, f"{method}_policy_seed{seed}.pt")
 
         torch.save(feedback["context"], f"{method}_eval_context.pt")
         torch.save(feedback["user_id"], f"{method}_eval_user_ids.pt")
         torch.save(dataset.user_embeddings, f"{method}_user_embeddings.pt")
         torch.save(dataset.action_context, f"{method}_action_context.pt")
-        return np.array(losses).reshape(n_epochs, -1).mean(axis=1)
+        return np.array(epoch_losses)
 
     first_stage = TwoTowerFirstStagePolicy(
         dim_context=5,
         num_items=dataset.n_actions,
         emb_dim=64,
-        top_k=5
+        top_k=10
     ).to(device)
     second_stage = SoftmaxSecondStagePolicy(
         dim_context=5,
@@ -149,7 +159,7 @@ def train(method, n_epochs=300, kernel_fn=None, seed=0):
     density_model = ConstantMarginalDensityModel().to(device)
     n_steps_per_epoch = 10
 
-    tau = 4.2
+    tau = 10.1
 
     def kernel_fn(y, y_i, _x, tau):
         vec_y = first_stage.item_embeddings(y)
@@ -280,7 +290,7 @@ def train(method, n_epochs=300, kernel_fn=None, seed=0):
                 policy_value = estimator.estimate_policy_value()
                 online_value = online_eval_once(method=method, seed=seed)
                 print(f"[Epoch {epoch}] Method: {method} | Loss: {loss.item():.4f} | OPE: {policy_value:.4f} | Online: {online_value:.4f} | AvgDist: {avg_min_dist:.4f}")
-                # print(f"[Epoch {epoch}] Method: {method} | Loss: {loss.item():.4f} | OPE: {policy_value:.4f} | Online: {online_value:.4f}")
+                # print(sf"[Epoch {epoch}] Method: {method} | Loss: {loss.item():.4f} | OPE: {policy_value:.4f} | Online: {online_value:.4f}")
 
     torch.save(dataset.action_context, f"{method}_action_context.pt")
     torch.save(x, f"{method}_eval_context.pt")

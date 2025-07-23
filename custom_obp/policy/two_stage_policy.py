@@ -108,3 +108,16 @@ class SoftmaxSecondStagePolicy(nn.Module):
             raise ValueError("Some actions not in top-k candidate set.")
 
         return torch.log(probs[index_in_A_k])
+    
+    def rank_outputs(self, x, A_k):
+        context_repr = self.fc(x)
+        item_embs = self.first_stage_policy.item_embeddings(A_k)
+
+        scores = torch.sum(context_repr.unsqueeze(1) * item_embs, dim=2)
+        probs = torch.softmax(scores, dim=1)
+
+        sorted_indices = torch.argsort(probs, dim=1, descending=True)
+        ranked_actions = A_k.gather(1, sorted_indices)
+        ranked_probs = probs.gather(1, sorted_indices)
+
+        return ranked_actions, ranked_probs
