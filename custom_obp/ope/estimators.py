@@ -102,40 +102,58 @@ class DoublyRobustEstimator(BaseOffPolicyEstimator):
         return dr_reward.mean()
 
 ### Two-stage estimators ###
-    
 class TwoStageISEstimator(BaseOffPolicyEstimator):
     def __init__(self, context, actions, rewards, behavior_pscore,
-                 first_stage_policy, second_stage_policy, candidates):
+                 first_stage_policy, second_stage_policy, candidates, action_context,
+                 logging_policy=None, ranking=False):
         self.context = context
         self.actions = actions
         self.rewards = rewards
         self.behavior_pscore = behavior_pscore
         self.first_stage = first_stage_policy
         self.second_stage = second_stage_policy
+        self.logging_policy = logging_policy
         self.candidates = candidates
+        self.action_context = action_context
+        self.ranking = ranking
 
     def _estimate_round_rewards(self):
-        probs = self.second_stage.calc_prob_given_output(self.context, self.candidates)
-        match = (self.candidates == self.actions.unsqueeze(1))
-        valid = match.any(dim=1)
+        if self.ranking:
+            x = self.context
+            ranked_actions = self.actions
+            ranked_rewards = self.rewards
+            r_agg = ranked_rewards.sum(dim=1)
 
-        pi2 = probs[match]
-        r_valid = self.rewards[valid]
-        pi0_valid = self.behavior_pscore[valid]
+            # joint log probs for IS ratio
+            log_pi2 = self.second_stage.log_prob_ranking(x, ranked_actions, self.candidates)
+            log_pi0 = self.logging_policy.log_prob_ranking(x, ranked_actions, self.candidates, self.action_context)
 
-        values = (pi2 / pi0_valid) * r_valid
-        return values
+            weight = torch.exp(log_pi2 - log_pi0)
+            log_pi1 = self.first_stage.log_prob_topk_set(x, self.candidates)
+
+            return weight.detach() * r_agg * log_pi1
+
+        else:
+            probs = self.second_stage.calc_prob_given_output(self.context, self.candidates)
+            match = (self.candidates == self.actions.unsqueeze(1))
+            valid = match.any(dim=1)
+
+            pi2 = probs[match]
+            r_valid = self.rewards[valid]
+            pi0_valid = self.behavior_pscore[valid]
+
+            return ((pi2 / pi0_valid) * r_valid)
 
     def estimate_policy_value(self) -> float:
         return self._estimate_round_rewards().mean().item()
 
     def estimate_policy_value_tensor(self) -> torch.Tensor:
         return self._estimate_round_rewards().mean()
-    
+       
 class KernelISEstimator(BaseOffPolicyEstimator):
     def __init__(self, context, actions, rewards, first_stage, second_stage,
                  logging_policy, kernel, tau, marginal_density_model, action_context, 
-                 candidates, num_epochs=10):
+                 candidates, ranking=False, num_epochs=10):
         self.context = context
         self.actions = actions
         self.rewards = rewards
@@ -148,42 +166,62 @@ class KernelISEstimator(BaseOffPolicyEstimator):
         self.action_context = action_context
         self.num_epochs = num_epochs
         self.candidates = candidates
+        self.ranking = ranking
         self.train_density_model = any(p.requires_grad for p in marginal_density_model.parameters())
 
     def estimateLMD(self):
         if not self.train_density_model:
             return
         optimizer = torch.optim.Adam(self.marginal_density_model.parameters())
+
         for _ in range(self.num_epochs):
             x = self.context
-            y = self.actions
-            sampled_y = self.logging_policy.sample_action(x, self.action_context)
-            k_val = self.kernel(y, sampled_y, x, self.tau)
-            pred_density = self.marginal_density_model.predict(x, y, self.action_context)
+            y_logged = self.actions             
+            if self.ranking:
+                y_logged = self.actions if self.actions.dim() == 2 else self.actions.unsqueeze(1)
+                ranked_sampled, _ = self.second_stage.rank_outputs(self.context, self.candidates)
+                y_sampled = ranked_sampled[:, :5] 
+            else:
+                y_logged = self.actions
+                y_sampled = self.logging_policy.sample_action(self.context, self.action_context)
+            k_val = self.kernel(y_logged, y_sampled, x, self.tau)
+            pred_density = self.marginal_density_model.predict(x, y_logged, self.action_context)
             loss = ((pred_density - k_val) ** 2).mean()
+            optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-    
+
     def kernel_is_value_estimate(self):
         x = self.context
-        y_log = self.actions
-        r = self.rewards
-        B = x.size(0)
+        log_pi1 = self.first_stage.log_prob_topk_set(x, self.candidates)
 
-        topk = self.candidates
+        if self.ranking:
+            y_logged = self.actions
+            r_agg = self.rewards.sum(dim=1)
 
-        sampled_idx = self.second_stage.sample_output(x, topk)
-        y_prime = topk[torch.arange(B, device=x.device), sampled_idx]
+            y_sampled = self.logging_policy.sample_ranking(x, self.candidates, self.action_context)
+            k_val = self.kernel(y_sampled, y_logged, x, self.tau)
 
-        k_val = self.kernel(y_prime, y_log, x, self.tau)
-        density = self.marginal_density_model.predict(x, y_log, self.action_context)
-        is_weight = (k_val / density).clamp(max=10)
-        values = is_weight * r
-        return values.mean()
+            density = self.marginal_density_model.predict(x, y_logged, self.action_context) 
+            is_weight = (k_val / density)
+            return (is_weight.detach() * r_agg * log_pi1).mean()
 
-    def estimate_policy_value(self) -> float:
-        return self.estimate_policy_value_tensor().item()
-    
+        else:
+            y_logged = self.actions  
+            r = self.rewards
+            topk = self.candidates
+
+            sampled_idx = self.second_stage.sample_output(x, topk)
+            y_sampled = topk[torch.arange(x.size(0), device=x.device), sampled_idx]
+
+            k_val = self.kernel(y_sampled, y_logged, x, self.tau)
+            density = self.marginal_density_model.predict(x, y_logged, self.action_context)
+            is_weight = k_val / density
+            return (is_weight.detach() * r * log_pi1).mean()
+
     def estimate_policy_value_tensor(self):
         self.estimateLMD()
         return self.kernel_is_value_estimate()
+
+    def estimate_policy_value(self) -> float:
+        return self.estimate_policy_value_tensor().item()

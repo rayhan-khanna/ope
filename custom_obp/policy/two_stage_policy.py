@@ -121,3 +121,33 @@ class SoftmaxSecondStagePolicy(nn.Module):
         ranked_probs = probs.gather(1, sorted_indices)
 
         return ranked_actions, ranked_probs
+    
+    def log_prob_ranking(self, x, ranked_actions, candidates):
+        B, K = ranked_actions.shape
+        log_probs = []
+        mask = torch.ones_like(candidates, dtype=torch.bool)
+
+        for pos in range(K):
+            # compute probs over available candidates
+            probs = self.calc_prob_given_output(x, candidates, mask=mask)
+            idx = ranked_actions[:, pos]
+
+            matches = (candidates == idx.unsqueeze(1))
+            candidate_indices = matches.float().argmax(dim=1)
+            log_probs.append(torch.log(probs[torch.arange(B), candidate_indices]))
+            mask[torch.arange(B), candidate_indices] = False
+
+        return torch.stack(log_probs, dim=1).sum(dim=1)
+    
+    def sample_ranking(self, context, candidates, final_k=5):
+        B = context.size(0)
+        mask = torch.ones_like(candidates, dtype=torch.bool)
+        ranking = torch.zeros(B, final_k, dtype=torch.long, device=context.device)
+
+        for pos in range(final_k):
+            probs = self.calc_prob_given_output(context, candidates, mask=mask)
+            sampled_idx = torch.multinomial(probs, num_samples=1).squeeze(1)
+            ranking[:, pos] = candidates[torch.arange(B), sampled_idx]
+            mask[torch.arange(B), sampled_idx] = False
+
+        return ranking

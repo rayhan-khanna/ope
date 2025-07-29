@@ -6,14 +6,16 @@ import random
 from online_eval import online_eval_once
 from opl_two_stage_train import train
 
-methods = [
-        "single_preference_is", "single_preference_kis", "multimodal_preference_is", "multimodal_preference_kis",
-        "naive_cf", "online_policy", "random", "oracle"]
+# methods = [
+#         "single_preference_is", "single_preference_kis", "multimodal_preference_is", "multimodal_preference_kis",
+#         "naive_cf", "online_policy", "random", "oracle"]
+methods = ["single_preference_kis", "multimodal_preference_kis", "naive_cf", "online_policy", "random", "oracle"]
 
 seeds = [0, 1, 2, 3, 4]
 all_losses = {}
 all_rewards = {}  # stores mean, std
 raw_rewards = {}  # stores raw per-seed values
+mean_probs_all = {}
 
 def set_seed(seed):
     torch.manual_seed(seed)
@@ -29,8 +31,9 @@ for method in methods:
         set_seed(seed)
 
         if method not in {"random", "oracle"}:
-            losses = train(method=method, seed=seed)
+            losses, mean_probs = train(method=method, seed=seed)
             seed_losses.append(losses)
+            mean_probs_all.setdefault(method, []).append(mean_probs)
 
         score = online_eval_once(method=method, seed=seed)
         scores.append(score)
@@ -83,3 +86,17 @@ plt.grid(True, linestyle='--', alpha=0.6)
 plt.tight_layout()
 plt.savefig("per_seed_rewards.png")
 plt.show()
+
+plt.figure(figsize=(10, 6))
+for method in mean_probs_all:
+    curves = np.array(mean_probs_all[method])
+    avg_curve = curves.mean(axis=0)
+    plt.plot(avg_curve, label=method.replace("_", " ").title())
+
+plt.xlabel("Epoch")
+plt.ylabel("Mean π(a | x, A_k)")
+plt.title("Softmax Confidence over Epochs")
+plt.legend()
+plt.grid(True)
+plt.tight_layout()
+plt.savefig("mean_probs_over_epochs.png")

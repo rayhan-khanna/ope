@@ -69,51 +69,73 @@ class DRGradient:
 
 class TwoStageISGradient:
     def __init__(self, first_stage, second_stage, context, actions, rewards,
-                 behavior_pscore, candidates):
+                 logging_policy, behavior_pscore, action_context, candidates, ranking=False, top_k=5):
         self.first_stage = first_stage
         self.second_stage = second_stage
         self.context = context
         self.actions = actions
         self.rewards = rewards
+        self.logging_policy = logging_policy
         self.behavior_pscore = behavior_pscore
+        self.action_context = action_context
         self.candidates = candidates
+        self.ranking = ranking
+        self.top_k = top_k
 
     def estimate_policy_gradient(self):
         x = self.context
-        a = self.actions
-        r = self.rewards
-        pi0 = self.behavior_pscore
         device = x.device
+        log_pi1 = self.first_stage.log_prob_topk_set(x, self.candidates)
 
-        topk = self.candidates
+        if self.ranking:
+            ranked_actions = self.actions
+            ranked_rewards = self.rewards
 
-        # log pi_1(A_k | x)
-        log_pi1 = self.first_stage.log_prob_topk_set(x, topk)
-        
-        # pi_2(a | x, A_k)
-        probs_topk = self.second_stage.calc_prob_given_output(x, topk)
+            # joint log prob of ranking under target policy
+            log_pi2 = self.second_stage.log_prob_ranking(
+                x, ranked_actions, self.candidates
+            )  # sum over positions
 
-        index_in_topk = (topk == a.unsqueeze(1)).nonzero(as_tuple=True)
-        valid_mask = torch.zeros(len(a), dtype=torch.bool, device=device)
-        valid_mask[index_in_topk[0]] = True
+            # joint log prob of ranking under behavior policy (approximate as product if independent)
+            log_pi0 = self.logging_policy.log_prob_ranking(
+                x, ranked_actions, self.candidates, self.action_context
+            )
 
-        pi_theta2 = probs_topk[index_in_topk]
+            # aggregated reward: sum (will need to adjust for diversity)
+            r_agg = ranked_rewards.sum(dim=1)
 
-        # compute loss
-        log_pi1 = log_pi1[valid_mask]
-        pi0 = pi0[valid_mask]
-        r = r[valid_mask]
+            weight = torch.exp(log_pi2 - log_pi0)
+            return -(weight.detach() * r_agg * log_pi1).mean()
 
-        weight = torch.clamp((pi_theta2 / pi0), max=10).detach()
-        return -(weight * r * log_pi1).mean()
+        else:
+            a = self.actions
+            r = self.rewards
+            pi0 = self.behavior_pscore
+            topk = self.candidates
+
+            probs_topk = self.second_stage.calc_prob_given_output(x, topk)
+            index_in_topk = (topk == a.unsqueeze(1)).nonzero(as_tuple=True)
+
+            valid_mask = torch.zeros(len(a), dtype=torch.bool, device=device)
+            valid_mask[index_in_topk[0]] = True
+
+            pi_theta2 = probs_topk[index_in_topk]
+
+            log_pi1 = log_pi1[valid_mask]
+            pi0 = pi0[valid_mask]
+            r = r[valid_mask]
+
+            weight = pi_theta2 / pi0
+            return -(weight.detach() * r * log_pi1).mean()
 
 class KernelISGradient:
     def __init__(self, first_stage, second_stage, context, actions, rewards, logging_policy,
-                 kernel, tau, marginal_density_model, action_context, candidates, num_epochs=10):
+                 kernel, tau, marginal_density_model, action_context, candidates,
+                 ranking=False, num_epochs=10):
         self.first_stage = first_stage
         self.second_stage = second_stage
         self.context = context
-        self.actions = actions 
+        self.actions = actions
         self.rewards = rewards
         self.logging_policy = logging_policy
         self.kernel = kernel
@@ -122,41 +144,62 @@ class KernelISGradient:
         self.action_context = action_context
         self.num_epochs = num_epochs
         self.candidates = candidates
+        self.ranking = ranking
         self.train_density_model = any(p.requires_grad for p in marginal_density_model.parameters())
 
     def estimateLMD(self):
-        """Train h_model to estimate logging marginal density."""
         if not self.train_density_model:
             return
         optimizer = torch.optim.Adam(self.marginal_density_model.parameters())
+
         for _ in range(self.num_epochs):
             x = self.context
-            y = self.actions
-            sampled_y = self.logging_policy.sample_action(x, self.action_context)
-            k_val = self.kernel(y, sampled_y, x, self.tau)
-            pred_density = self.marginal_density_model.predict(x, y, self.action_context)
+            y_logged = self.actions             
+            if self.ranking:
+                y_logged = self.actions if self.actions.dim() == 2 else self.actions.unsqueeze(1)
+                ranked_sampled, _ = self.second_stage.rank_outputs(self.context, self.candidates)
+                y_sampled = ranked_sampled[:, :5] 
+            else:
+                y_logged = self.actions
+                y_sampled = self.logging_policy.sample_action(self.context, self.action_context)
+            k_val = self.kernel(y_logged, y_sampled, x, self.tau)
+            pred_density = self.marginal_density_model.predict(x, y_logged, self.action_context)
             loss = ((pred_density - k_val) ** 2).mean()
+            optimizer.zero_grad()
             loss.backward()
             optimizer.step()
 
     def estimate_policy_gradient(self) -> torch.Tensor:
         self.estimateLMD()
-
-        x = self.context 
-        y_logged = self.actions  
-        r = self.rewards
-        topk = self.candidates
+        x = self.context
         B = x.shape[0]
+        log_pi1 = self.first_stage.log_prob_topk_set(x, self.candidates)
 
-        sampled_idx = self.second_stage.sample_output(x, topk)
-        y_sampled = topk[torch.arange(B, device=x.device), sampled_idx]
+        if self.ranking:
+            y_logged = self.actions
+            ranked_rewards = self.rewards
+            r_agg = ranked_rewards.sum(dim=1)
 
-        log_pi1 = self.first_stage.log_prob_topk_set(x, topk)
+            # sampled ranking from target policy
+            y_sampled = self.second_stage.sample_ranking(x, self.candidates)
 
-        k_val = self.kernel(y_sampled, y_logged, x, self.tau)
-        
-        density = self.marginal_density_model.predict(x, y_logged, self.action_context)      
-        is_weight = (k_val / density).clamp(max=10)
+            # kernel similarity between logged and sampled rankings
+            k_val = self.kernel(y_sampled, y_logged, x, self.tau)
 
-        loss = -(is_weight.detach() * r * log_pi1).mean()
-        return loss
+            density = self.marginal_density_model.predict(x, y_logged, self.action_context) 
+            is_weight = k_val / density
+            return -(is_weight.detach() * r_agg * log_pi1).mean()
+
+        else:
+            y_logged = self.actions  
+            r = self.rewards
+            topk = self.candidates
+
+            sampled_idx = self.second_stage.sample_output(x, topk)
+            y_sampled = topk[torch.arange(B, device=x.device), sampled_idx]
+
+            k_val = self.kernel(y_sampled, y_logged, x, self.tau)
+            density = self.marginal_density_model.predict(x, y_logged, self.action_context)
+            is_weight = k_val / density
+
+            return -(is_weight.detach() * r * log_pi1).mean()
