@@ -62,8 +62,21 @@ def train(method, n_epochs=300, kernel_fn=None, seed=0):
         single_stage=(method=="naive_cf")
     )
 
+    pref_net = dataset.PrefNet(dim_ctx=dataset.dim_context, dim_emb=dataset.action_context.size(1)).to(device)
     feedback = dataset.obtain_batch_bandit_feedback(n_samples=100000, n_users=1000)
 
+    actions = feedback["action"] 
+    D = dataset.action_context.size(1)
+
+    if actions.dim() == 1:                           
+        row_emb = dataset.action_context[actions]       
+
+    else:                                              
+        N, R = actions.shape         
+        row_emb = dataset.action_context[actions.view(-1)] .view(N, R, D).mean(1)
+
+    feedback["row_emb"] = row_emb.to(device)
+ 
     if method in {"random", "oracle"}:
         torch.save(feedback["user_id"], f"{method}_eval_user_ids.pt")
         torch.save(dataset.user_embeddings, f"{method}_user_embeddings.pt")
@@ -79,17 +92,19 @@ def train(method, n_epochs=300, kernel_fn=None, seed=0):
         model = NaiveCF(dim_context=dataset.dim_context, n_items=dataset.n_actions, emb_dim=32).to(device)
         optimizer = optim.Adam(model.parameters())
         loss_fn = nn.MSELoss()
+        a_flat = a.squeeze(1) if a.dim() == 2 else a
+        r_flat = r.squeeze(1) if r.dim() == 2 else r
         for epoch in range(n_epochs):
             optimizer.zero_grad()
-            preds = model(x, a)
-            loss = loss_fn(preds, r)
+            preds = model(x, a_flat)
+            loss = loss_fn(preds, r_flat)
             loss.backward()
             losses.append(loss.item())
             optimizer.step()
 
             if epoch % 10 == 0:
                 with torch.no_grad():
-                    mse = ((model(x, a) - r) ** 2).mean()
+                    mse = ((model(x, a_flat) - r_flat) ** 2).mean()
                     print(f"[Epoch {epoch}] Method: {method} | Loss: {loss.item():.4f} | MSE: {mse.item():.4f}")
 
         torch.save(model.state_dict(), f"{method}_policy_seed{seed}.pt")
@@ -188,13 +203,25 @@ def train(method, n_epochs=300, kernel_fn=None, seed=0):
 
     tau = 9.3 # 10.1 for the uniform logging policy case topk=10, etc.
 
-    def kernel_fn(y, y_i, _x, tau):
-        vec_y = first_stage.item_embeddings(y)
-        vec_yi = first_stage.item_embeddings(y_i)
-        if vec_y.dim() == 3:
-            vec_y = vec_y.reshape(vec_y.size(0), -1)
-            vec_yi = vec_yi.reshape(vec_yi.size(0), -1)
-        return torch.exp(-((vec_y - vec_yi).pow(2).sum(dim=-1)) / (2 * tau**2))
+    def kernel_fn(rank_a, rank_b, _x, tau):
+        emb_a = first_stage.item_embeddings(rank_a)
+        emb_b = first_stage.item_embeddings(rank_b)
+
+        if emb_a.dim() == 2:
+            emb_a = emb_a.unsqueeze(1)
+            emb_b = emb_b.unsqueeze(1)
+
+        D = emb_a.size(-1)
+        sims = torch.exp(
+            -torch.cdist(
+                emb_a.view(-1, D),
+                emb_b.view(-1, D),
+                p=2
+            ).pow(2) / (2 * tau**2)
+        )
+
+        sims_row = sims.view(emb_a.size(0), emb_a.size(1), -1).mean(dim=(1, 2))  # [N]
+        return sims_row
 
     for epoch in range(n_epochs):
         for _ in range(n_steps_per_epoch):
@@ -205,10 +232,9 @@ def train(method, n_epochs=300, kernel_fn=None, seed=0):
                     n_pref_per_user = 1
                 else: 
                     n_pref_per_user = 5
-
-                sampled_data = dataset.sample_k_prefs(feedback, n_pref_per_user)
+                sampled_data = dataset.sample_k_prefs(feedback, n_pref_per_user=n_pref_per_user, pref_net=pref_net, gamma=1.0, tau_pref=0.1)
                 x_sampled = sampled_data["context"].to(device)
-                a_sampled = sampled_data["action"].to(device)   # logged actions (DO NOT overwrite)
+                a_sampled = sampled_data["action"].to(device)
                 r_sampled = sampled_data["reward"].to(device)
 
                 if a_sampled.dim() == 3:
@@ -220,7 +246,6 @@ def train(method, n_epochs=300, kernel_fn=None, seed=0):
                 resampled_candidates = first_stage.sample_topk_gumbel(x_sampled)
                 logged_actions = a_sampled  
                 if a_sampled.dim() == 2 and a_sampled.size(1) == 1:
-                    # if it's really a single action, squeeze to (B,)
                     a_sampled = a_sampled.squeeze(1)
                     r_sampled = r_sampled.squeeze(1)
                     ranking = False
@@ -255,8 +280,6 @@ def train(method, n_epochs=300, kernel_fn=None, seed=0):
                         dim=1  
                     )
                     valid = match.any(dim=2).any(dim=1) 
-                    # match = (resampled_candidates.unsqueeze(1) == a_sampled.unsqueeze(-1))
-                    # valid = match.all(dim=2).all(dim=1)
 
                 x_valid = x_sampled[valid]
                 if x_valid.size(0) == 0:
@@ -328,16 +351,16 @@ def train(method, n_epochs=300, kernel_fn=None, seed=0):
             else:
                 n_pref_eval = 5
 
-            eval_data = dataset.sample_k_prefs(feedback, n_pref_eval)
+            eval_data = dataset.sample_k_prefs(feedback, n_pref_per_user=n_pref_eval, pref_net=pref_net, gamma=1.0, tau_pref=0.1)
             eval_context = eval_data["context"]
             eval_action = eval_data["action"]
             eval_reward = eval_data["reward"]
             eval_candidates = first_stage.sample_topk_gumbel(eval_context)
-            if eval_action.dim() == 3:          # [B, P, R]  (multi‑preference)
+            if eval_action.dim() == 3:
                 B, P, R = eval_action.shape
-                eval_context  = eval_context.repeat_interleave(P, 0)   # keep aligned
-                eval_action   = eval_action.view(B*P, R)               # [B·P, R]
-                eval_reward   = eval_reward.view(B*P, R)
+                eval_context = eval_context.repeat_interleave(P, 0)
+                eval_action = eval_action.view(B*P, R)
+                eval_reward = eval_reward.view(B*P, R)
                 eval_candidates = eval_candidates.repeat_interleave(P, 0)
 
             ranking_eval = not (eval_action.dim() == 2 and eval_action.size(1) == 1)
@@ -401,14 +424,12 @@ def train(method, n_epochs=300, kernel_fn=None, seed=0):
 
             policy_value = estimator.estimate_policy_value()
             online_value = online_eval_once(method=method, seed=seed)
-            # print(f"[Epoch {epoch}] Method: {method} | Loss: {loss.item():.4f} | OPE: {policy_value:.4f} | Online: {online_value:.4f}")
             print(
                     f"[Epoch {epoch}] Method: {method} | Loss: {loss.item():.4f} "
                     f"| OPE: {policy_value:.4f} | Online: {online_value:.4f} "
                     f"| AvgDist: {avg_min_dist:.4f}"
                 )
-            # print(sf"[Epoch {epoch}] Method: {method} | Loss: {loss.item():.4f} | OPE: {policy_value:.4f} | Online: {online_value:.4f}")
-
+            
     torch.save(dataset.action_context, f"{method}_action_context.pt")
     torch.save(x, f"{method}_eval_context.pt")
     torch.save(u, f"{method}_eval_user_ids.pt")

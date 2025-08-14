@@ -185,7 +185,6 @@ class KernelISGradient:
 
             # kernel similarity between logged and sampled rankings
             k_val = self.kernel(y_sampled, y_logged, x, self.tau)
-
             density = self.marginal_density_model.predict(x, y_logged, self.action_context) 
             is_weight = k_val / density
             return -(is_weight.detach() * r_agg * log_pi1).mean()

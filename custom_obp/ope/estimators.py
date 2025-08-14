@@ -185,6 +185,8 @@ class KernelISEstimator(BaseOffPolicyEstimator):
                 y_logged = self.actions
                 y_sampled = self.logging_policy.sample_action(self.context, self.action_context)
             k_val = self.kernel(y_logged, y_sampled, x, self.tau)
+            if k_val.dim() > 1:
+                k_val = k_val.mean(dim=1)
             pred_density = self.marginal_density_model.predict(x, y_logged, self.action_context)
             loss = ((pred_density - k_val) ** 2).mean()
             optimizer.zero_grad()
@@ -201,7 +203,6 @@ class KernelISEstimator(BaseOffPolicyEstimator):
 
             y_sampled = self.logging_policy.sample_ranking(x, self.candidates, self.action_context)
             k_val = self.kernel(y_sampled, y_logged, x, self.tau)
-
             density = self.marginal_density_model.predict(x, y_logged, self.action_context) 
             is_weight = (k_val / density)
             return (is_weight.detach() * r_agg * log_pi1).mean()

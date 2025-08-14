@@ -40,28 +40,77 @@ def online_eval_once(method: str, seed: int) -> float:
             repeated_context = x_test[i].repeat(dataset.n_actions, 1)
             scores = model(repeated_context, item_ids)
             top5 = torch.topk(scores, k=5).indices
-            reward_list = [dataset.reward_function(user_ids[i:i+1], top5[j:j+1]) for j in range(5)]
-            avg_reward = torch.stack(reward_list).mean()
+            if top5.dim() == 1:
+                B, K = 1, top5.size(0)
+            else:
+                B, K = top5.shape
+
+            user_ids_exp = user_ids[i].repeat(K)
+            actions_exp = top5
+            rewards_flat = dataset.reward_function(user_ids_exp, actions_exp)
+            avg_reward = rewards_flat.mean()
             rewards.append(avg_reward)
 
         return torch.tensor(rewards).mean().item()
 
     if method == "oracle":
-        all_scores = torch.matmul(x_test, dataset.action_context.T)
-        top5_actions = torch.topk(all_scores, k=5, dim=1).indices
-        reward_list = [
-            dataset.reward_function(user_ids, top5_actions[:, i])
-            for i in range(5)
-        ]
-        rewards = torch.stack(reward_list, dim=1).mean(dim=1)
+        gamma = 1.2
+        k = 5
+        item_vecs = dataset.action_context
+        U, N = x_test.size(0), item_vecs.size(0)
+
+        # precompute relevance 
+        relevance = x_test @ item_vecs.T
+
+        # precompute cosine similarity for vendi cscore
+        items_norm = torch.nn.functional.normalize(item_vecs, p=2, dim=1)
+        cos = items_norm @ items_norm.T
+
+        # tack selected items per user
+        selected = torch.zeros(U, 0, dtype=torch.long, device=device)
+        mask = torch.zeros(U, N, dtype=torch.bool, device=device)
+
+        for t in range(k):
+            if t == 0:
+                diversity = torch.zeros_like(relevance)
+            else:
+                K_sel = torch.stack([
+                    cos[idx][:, idx] for idx in selected
+                ])
+
+                sims = cos[:, selected.reshape(-1)].T.reshape(U, N, t)                
+                G = torch.zeros(U, N, t+1, t+1, device=device)
+                G[:, :, :t, :t] = K_sel.unsqueeze(1).expand(-1, N, -1, -1)
+                G[:, :, :t, t] = sims
+                G[:, :, t, :t] = sims
+                G[:, :, t, t] = 1.0
+
+                G = G / (t + 1)
+                eigvals = torch.linalg.eigvalsh(G.cpu()).to(device)
+                entropy = -(eigvals.clamp_min(1e-12) * eigvals.clamp_min(1e-12).log()).sum(dim=-1)
+                diversity = entropy.exp() 
+
+            scores = relevance + gamma * diversity
+            scores[mask] = -1e9  # mask picked items
+            best = scores.argmax(dim=1) 
+
+            selected = torch.cat([selected, best.unsqueeze(1)], dim=1)
+            mask[torch.arange(U), best] = True
+
+        user_ids_exp = user_ids.unsqueeze(1).repeat(1, k).reshape(-1)
+        actions_exp = selected.reshape(-1)
+        rewards = dataset.reward_function(user_ids_exp, actions_exp).view(U, k).mean(dim=1)
         return rewards.mean().item()
 
     if method == "random":
         actions = torch.randint(0, dataset.n_actions, (10000,), device=device)
         rewards = dataset.reward_function(user_ids, actions)
         top5_random = torch.randint(0, dataset.n_actions, (10000, 5), device=device)
-        reward_list = [dataset.reward_function(user_ids, top5_random[:, i]) for i in range(5)]
-        rewards = torch.stack(reward_list, dim=1).mean(dim=1)
+        B, K = top5_random.shape
+        user_ids_exp = user_ids.unsqueeze(1).repeat(1, K).reshape(-1)
+        actions_exp = top5_random.reshape(-1)
+        rewards_flat = dataset.reward_function(user_ids_exp, actions_exp)
+        rewards = rewards_flat.view(B, K).mean(dim=1)
         return rewards.mean().item()
         
     else:
@@ -91,7 +140,11 @@ def online_eval_once(method: str, seed: int) -> float:
         ranked_actions, _ = second_stage.rank_outputs(x_test, candidates)
         top5_actions = ranked_actions[:, :5]
 
-        reward_list = [dataset.reward_function(user_ids, top5_actions[:, i]) for i in range(5)]
-        rewards = torch.stack(reward_list, dim=1).mean(dim=1)
+        B, K = top5_actions.shape
+        user_ids_exp = user_ids.unsqueeze(1).repeat(1, K).reshape(-1)
+        actions_exp = top5_actions.reshape(-1)
+
+        rewards_flat = dataset.reward_function(user_ids_exp, actions_exp)
+        rewards = rewards_flat.view(B, K).mean(dim=1)
 
         return rewards.mean().item()

@@ -1,4 +1,5 @@
 import torch
+import torch.nn as nn
 from sklearn.utils import check_random_state
 from custom_obp.policy.action_policies import SoftmaxPolicy
 
@@ -39,7 +40,6 @@ class CustomSyntheticBanditDataset:
         self.second_stage_policy = second_stage_policy
 
     def sample_context(self, n):
-        """Sample n context vectors from a Gaussian distribution."""
         return torch.tensor(
             self.random_.normal(size=(n, self.dim_context)),
             dtype=torch.float32,
@@ -47,86 +47,32 @@ class CustomSyntheticBanditDataset:
         )
 
     def sample_policy_full(self, context):
-        """Sample from full action space (no top-k restriction)."""
         return torch.tensor([
             self.action_policy.sample_action(context[i], self.action_context)
             for i in range(context.shape[0])
         ], dtype=torch.long).to(self.device)
 
     def generate_data(self, context, user_ids):
-        """Generates logged interactions with context, RANKED actions, rewards, and user IDs."""
         if self.single_stage:
-            actions = self.sample_policy_full(context).unsqueeze(1)  # single-action fallback as [B,1]
+            actions = self.sample_policy_full(context).unsqueeze(1)
             rewards = self.reward_function(user_ids, actions.squeeze(1)).unsqueeze(1)
             return {"context": context, "user_id": user_ids, "action": actions, "reward": rewards}
 
-        candidates = self.candidate_selection(context)  # [B, top_k]
-        ranked_actions, ranked_probs = self.rank_from_candidates(context, candidates)  # [B, ranking_size]
-
+        candidates = self.candidate_selection(context)
+        ranked_actions, ranked_probs = self.rank_from_candidates(context, candidates)
         rewards = torch.stack([
             self.reward_function(user_ids[i].repeat(self.ranking_size), ranked_actions[i])
             for i in range(len(user_ids))
-        ])  # [B, ranking_size]
+        ])
 
         return {
             "context": context,
             "user_id": user_ids,
             "candidates": candidates,
-            "action": ranked_actions,       # LOGGED RANKING
-            "action_probs": ranked_probs,   # position-wise probs under logging policy
-            "reward": rewards               # position-wise rewards
+            "action": ranked_actions,
+            "action_probs": ranked_probs,
+            "reward": rewards
         }
-
-    # def generate_data(self, context, user_ids):
-    #     """Generates logged interactions with context, actions, rewards, and user IDs."""
-    #     if self.single_stage:
-    #         actions = self.sample_policy_full(context)
-    #         rewards = self.reward_function(user_ids, actions)
-    #         return {
-    #             "context": context,
-    #             "user_id": user_ids,
-    #             "action": actions,
-    #             "reward": rewards,
-    #         }
-
-    #     candidates = self.candidate_selection(context)
-    #     actions = self.sample_policy(candidates, context)
-    #     rewards = self.reward_function(user_ids, actions)
-
-    #     return {
-    #         "context": context,
-    #         "user_id": user_ids,
-    #         "candidates": candidates,
-    #         "action": actions,
-    #         "reward": rewards,
-    #     }
-    
-    # def sample_k_prefs(self, feedback, n_pref_per_user):        
-    #     x_all = feedback["context"]
-    #     a_all = feedback["action"]
-    #     r_all = feedback["reward"]
-    #     pi0_all = feedback["pscore"]
-    #     user_ids = feedback["user_id"]
-
-    #     selected_indices = []
-
-    #     for user_id in torch.unique(user_ids):
-    #         user_mask = user_ids == user_id
-    #         user_indices = torch.nonzero(user_mask, as_tuple=False).squeeze()
-
-    #         if len(user_indices) >= n_pref_per_user:
-    #             chosen = user_indices[torch.randperm(len(user_indices))[:n_pref_per_user]]
-    #             selected_indices.append(chosen)
-
-    #     selected_indices = torch.cat(selected_indices)
-    #     device = selected_indices.device
-    #     return {
-    #         "context": x_all[selected_indices].to(device),
-    #         "action": a_all[selected_indices].to(device),
-    #         "reward": r_all[selected_indices].to(device),
-    #         "pscore": pi0_all[selected_indices].to(device),
-    #         "user_id": user_ids[selected_indices].to(device)
-    #     }
 
     def rank_from_candidates(self, context, candidates):
         """Sample a ranking of size `ranking_size` from candidates using logging policy."""
@@ -143,34 +89,100 @@ class CustomSyntheticBanditDataset:
 
         return torch.stack(ranked_actions), torch.stack(ranked_probs)
 
-    def sample_k_prefs(self, feedback, n_pref_per_user: int):
-        x_all, a_all, r_all = feedback["context"], feedback["action"], feedback["reward"]
-        pi0_all, user_ids = feedback["pscore"], feedback["user_id"]
-        device = x_all.device
+    class PrefNet(nn.Module):
+        def __init__(self, dim_ctx: int, dim_emb: int, hidden: int = 128):
+            super().__init__()
+            self.net = nn.Sequential(
+                nn.Linear(dim_ctx + dim_emb, hidden), nn.ReLU(),
+                nn.Linear(hidden, 2 * dim_emb)
+            )
 
-        contexts, actions, rewards, pscores, users = [], [], [], [], []
+        def forward(self, ctx: torch.Tensor, agg: torch.Tensor):
+            h = torch.cat([ctx, agg], dim=-1)
+            mu, log_sigma = self.net(h).chunk(2, dim=-1)
+            return mu, log_sigma.exp()
 
-        for uid in torch.unique(user_ids):
-            idx = torch.nonzero(user_ids == uid, as_tuple=False).squeeze()
-            if idx.numel() >= n_pref_per_user:
-                chosen = idx[torch.randperm(idx.numel())[:n_pref_per_user]]
-                contexts.append(x_all[chosen[0]])
-                actions.append(a_all[chosen])
-                rewards.append(r_all[chosen])
-                pscores.append(pi0_all[chosen])
-                users.append(uid)
+    def sample_k_prefs(
+        self,
+        fb,
+        n_pref_per_user: int,
+        pref_net,
+        gamma: float = 1.0,
+        tau_pref: float = 0.1,
+    ):
+        ctx_all, row_emb_all = fb["context"], fb["row_emb"]
+        a_all, r_all, p_all = fb["action"], fb["reward"], fb["pscore"]
+        u_all = fb["user_id"]
+        device, D = ctx_all.device, row_emb_all.size(-1)
+
+        uniq_u, inv = torch.unique(u_all, return_inverse=True)
+        B = len(uniq_u)
+
+        if n_pref_per_user == 1:
+            first_row = torch.stack([(inv == i).nonzero(as_tuple=True)[0][0]
+                                    for i in range(B)], dim=0)
+            return {
+                "context": ctx_all[first_row],
+                "action" : a_all [first_row].unsqueeze(1),
+                "reward" : r_all [first_row].unsqueeze(1),
+                "pscore" : p_all [first_row].unsqueeze(1),
+                "user_id": uniq_u,
+            }
+
+        rows_left = [(inv == k).nonzero(as_tuple=True)[0].to(device) for k in range(B)]
+        agg_emb = torch.zeros(B, D, device=device) 
+        chosen_idx = [[] for _ in range(B)] 
+
+        for j in range(n_pref_per_user):
+            len_rows = torch.tensor([len(r) for r in rows_left], device=device)
+            active = len_rows > 0
+            if not active.any(): break
+
+            act_id = active.nonzero(as_tuple=True)[0]
+            first_rows = torch.stack([
+                (inv == k).nonzero(as_tuple=True)[0][0]
+                for k in act_id
+            ])
+            ctx_batch = ctx_all[first_rows] 
+            agg_batch = agg_emb[act_id] / (j if j else 1)
+
+            mu, sigma = pref_net(ctx_batch, agg_batch)
+            w_batch = mu + tau_pref * sigma * torch.randn_like(mu)
+
+            logits_split = []
+            ptr = 0
+            for k in act_id:
+                rows = rows_left[k]
+                emb = row_emb_all[rows]
+                logits_split.append((emb @ w_batch[ptr].T) / gamma)
+                ptr += 1
+            logits = torch.cat(logits_split)
+
+            gumbel = -torch.empty_like(logits).exponential_().log()
+            logits = (logits + gumbel).split(len_rows[act_id].tolist())
+
+            for idx_u, k in enumerate(act_id):
+                if logits[idx_u].numel() == 0: continue
+                loc = logits[idx_u].argmax().item()
+                chosen_idx[k].append(rows_left[k][loc])
+
+                agg_emb[k] += row_emb_all[rows_left[k][loc]]
+                keep = torch.arange(len_rows[k], device=device) != loc
+                rows_left[k] = rows_left[k][keep]
+
+        mask_users = torch.tensor([len(c) > 0 for c in chosen_idx], device=device)
+        sel_rows = [torch.stack(chosen_idx[k]) for k in mask_users.nonzero(as_tuple=True)[0]]
+        sel_rows = torch.stack(sel_rows)
 
         return {
-            "context": torch.stack(contexts).to(device),
-            "action":  torch.stack(actions).to(device),
-            "reward":  torch.stack(rewards).to(device),
-            "pscore":  torch.stack(pscores).to(device),
-            "user_id": torch.stack(users).to(device)
+            "context": ctx_all[sel_rows[:, 0]],
+            "action" : a_all [sel_rows],
+            "reward" : r_all [sel_rows],
+            "pscore" : p_all [sel_rows],
+            "user_id": uniq_u[mask_users],
         }
 
     def candidate_selection(self, context):
-        """Select top-K candidates based on inner product search, with Gumbel 
-        noise."""
         scores = torch.matmul(context, self.action_context.T)
         gumbel_noise = -torch.log(-torch.log(torch.rand_like(scores)))
         noisy_scores = scores + gumbel_noise
@@ -178,95 +190,49 @@ class CustomSyntheticBanditDataset:
         return top_k_indices
 
     def sample_policy(self, candidates, context):
-        """Use the provided policy to select an action."""
         return torch.tensor([
             self.action_policy.select_action(candidates[i], context[i], self.action_context)
             for i in range(candidates.shape[0])
         ], dtype=torch.long).to(self.device)
-    
+
+    def vendi_score(self, embeddings: torch.Tensor):
+        if embeddings.size(0) < 2:
+            return torch.tensor(0.0, device=embeddings.device)
+        K = embeddings @ embeddings.T
+        diag = torch.sqrt(torch.diag(K)).unsqueeze(0)
+        K = K / (diag.T @ diag + 1e-12)  # cosine normalization
+        eps = 1e-6 * torch.eye(K.size(0), device=K.device)  # jitter for stability
+        eigvals = torch.linalg.eigvalsh(K / K.size(0) + eps)
+        eigvals = eigvals.clamp(min=1e-12)
+        entropy = -(eigvals * torch.log(eigvals)).sum()
+        return torch.exp(entropy)
+
     def reward_function(self, user_ids, actions):
-        """
-        Compute expected reward using entity vector (user/context) and item embeddings.
-        """
         if self.second_stage_policy is not None:
             item_vecs = self.second_stage_policy.first_stage_policy.item_embeddings(actions)
         else:
             item_vecs = self.action_context[actions]
 
         user_vecs = self.user_embeddings[user_ids.long()]
-        mean_reward = torch.sum(user_vecs * item_vecs, dim=1)
-        noise = torch.randn_like(mean_reward) * self.reward_std
-        return (mean_reward + noise).to(self.device)
+        relevance = torch.sum(user_vecs * item_vecs, dim=1) # relevance per item
+        noise = torch.randn_like(relevance) * self.reward_std
 
-    # def obtain_batch_bandit_feedback(self, n_samples, n_users):
-    #     self.n_users = n_users
+        if self.ranking_size > 1:  
+            # compute diversity per ranked list (batch)
+            batch_size = user_ids.size(0) // self.ranking_size
+            diversity_scores = []
+            for i in range(batch_size):
+                block = item_vecs[i * self.ranking_size:(i + 1) * self.ranking_size]
+                diversity_scores.append(self.vendi_score(block))
+            diversity_scores = torch.stack(diversity_scores)
 
-    #     # fixed user embedding matrix (context per user)
-    #     self.user_embeddings = torch.tensor(
-    #         self.random_.normal(size=(n_users, self.dim_context)),
-    #         dtype=torch.float32,
-    #         device=self.device
-    #     )
-
-    #     # repeat user IDs to match desired sample count
-    #     user_ids = torch.arange(n_users, device=self.device).repeat(n_samples // n_users + 1)[:n_samples]
-    #     user_ids = user_ids[torch.randperm(n_samples)]
-
-    #     # assign each interaction user context
-    #     context = self.user_embeddings[user_ids]
-    #     data = self.generate_data(context, user_ids)
-
-    #     if self.single_stage:
-    #         pi_b = torch.stack([
-    #             self.action_policy.probs(context[i], self.action_context)
-    #             for i in range(n_samples)
-    #         ]).to(self.device)
-    #         pscore = pi_b[torch.arange(n_samples), data["action"]]
-
-    #         return {
-    #             "n_samples": n_samples,
-    #             **data,
-    #             "pi_b": pi_b,
-    #             "pscore": pscore,
-    #         }
-
-    #     expected_rewards = torch.zeros((n_samples, self.top_k), device=self.device)
-    #     for i in range(n_samples):
-    #         expected_rewards[i] = self.reward_function(
-    #             data["user_id"][i:i+1],
-    #             data["candidates"][i]
-    #         )
-
-    #     log_pscores = (data["action_probs"].log()).sum(dim=1)   # sum of log probs (joint)
-
-    #     pi_b = torch.stack([
-    #         self.action_policy.probs(
-    #             context[i],
-    #             self.action_context[data["candidates"][i]]
-    #         )
-    #         for i in range(n_samples)
-    #     ]).to(self.device)
-
-    #     # # match sampled action to index in candidate set
-    #     # chosen_prob = torch.tensor([
-    #     #     pi_b[i, (data["candidates"][i] == data["action"][i]).nonzero(as_tuple=True)[0]].item()
-    #     #     for i in range(n_samples)
-    #     # ], dtype=torch.float32, device=self.device)
-
-    #     # return {
-    #     #     "n_samples": n_samples,
-    #     #     **data,
-    #     #     "expected_reward": expected_rewards,
-    #     #     "pi_b": pi_b,
-    #     #     "pscore": chosen_prob,
-    #     # }
-
-    #     return {
-    #         "n_samples": n_samples,
-    #         **data,
-    #         "pi_b": data["action_probs"],         # position-wise probs
-    #         "pscore": log_pscores.exp(),          # joint prob of ranking
-    #     }
+            # repeat diversity score across ranking positions
+            diversity_scores = diversity_scores.repeat_interleave(self.ranking_size)
+            gamma = 1.2  # hyperparam to weight diversity
+            return relevance + gamma * diversity_scores + noise
+        else:
+            # single-action case: no diversity term
+            return relevance + noise
 
     def obtain_batch_bandit_feedback(self, n_samples, n_users):
         self.n_users = n_users
