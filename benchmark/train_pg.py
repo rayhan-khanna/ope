@@ -8,11 +8,11 @@ import torch.nn.functional as F
 import torch.optim as optim
 import wandb
 
-from custom_obp.synthetic_bandit_dataset import N_MODES
-from custom_obp.policy import MultiPreferencePolicy
-from benchmark.ope.late_stage import greedy_slate, minrel_value, slate_value, slate_components
-from benchmark.ope.latent_eval import (latent_value, rank_under_z, search_draws, anchor_values, budget_references,
-                                       SEED_RANDOM, SEED_ORACLE, EVAL_DRAWS)
+from env.synthetic_bandit_dataset import N_MODES
+from env.policy import MultiPreferencePolicy
+from benchmark.late_stage import greedy_slate, minrel_value, slate_value, slate_components
+from benchmark.latent_eval import (latent_value, rank_under_z, search_draws, anchor_values, budget_references,
+                                   SEED_RANDOM, SEED_ORACLE, EVAL_DRAWS)
 
 ITEM_LR, PREF_LR = 0.01, 0.03
 BATCH_SIZE = 128
@@ -23,10 +23,10 @@ COLLAPSE_FRAC = 0.65
 REWARD_SCALE_BETA = 0.99
 VAL_DRAW_USERS = 10000
 MINREL_ORACLE_USERS = 256
-METRICS_KEYS = ("relative_reward", "relative_reward_type0", "relative_reward_type1", "relative_reward_type2")
 
-# reference values: scalars at the trained budget, per user type, and per other deploy budget
-References = namedtuple("References", "random oracle by_type by_budget")
+# reference values: scalars at the trained budget, per user type and per other deploy budget, plus constant
+# fields logged with them (the latent oracle's two constructions)
+References = namedtuple("References", "random oracle by_type by_budget components")
 # a greedy deployment: per-user reward, the (rel, div) legs (None in the latent setting) and the candidate sets
 Deploy = namedtuple("Deploy", "reward rel div candidates")
 
@@ -52,7 +52,7 @@ def candidate_diversity(dataset, candidates):
     if dataset.latent:
         w = dataset.user_z_weights
         out["mass_covered"] = (w * (counts > 0)).sum(1)
-        out["mass_full"] = (w * (counts >= dataset.R)).sum(1)
+        out["mass_full"] = (w * (counts >= dataset.L)).sum(1)
         return out
     rel, dist = dataset.relevance_and_distance(torch.arange(dataset.n_users, device=dataset.device), candidates)
     rel = rel.clamp_min(0)
@@ -79,6 +79,7 @@ def deployment_log(dataset, refs, deploy, sweep):
     log_per_type(log, "eval_batch_reward", deploy.reward, types)
     if refs is not None:
         log["random_slate_reward"], log["oracle_slate_reward"] = refs.random, refs.oracle
+        log.update(refs.components)
         log["relative_reward"] = relative(log["eval_batch_reward"], refs.random, refs.oracle)
         for t, (random_t, oracle_t) in refs.by_type.items():
             log[f"relative_reward_type{t}"] = relative(log[f"eval_batch_reward_type{t}"], random_t, oracle_t)
@@ -146,17 +147,20 @@ def latent_references(run):
     dataset = run.dataset
     K = dataset.K
     rel_draws = search_draws(dataset)
-    random_value, oracle_value = anchor_values(dataset, K, rel_draws, SEED_RANDOM, SEED_ORACLE)
+    random_value, sampled, greedy = anchor_values(dataset, K, rel_draws, SEED_RANDOM, SEED_ORACLE)
+    oracle_value = torch.maximum(sampled, greedy)
     random_ref, oracle_ref = random_value.mean().item(), oracle_value.mean().item()
+    components = {"oracle_sampled_reward": sampled.mean().item(), "oracle_greedy_reward": greedy.mean().item()}
     print(f"[anchors] K={K}: random={random_ref:.4f} oracle={oracle_ref:.4f} "
-          f"({dataset.n_users} users, {EVAL_DRAWS} interest draws)")
+          f"(sampled={components['oracle_sampled_reward']:.4f} greedy={components['oracle_greedy_reward']:.4f}; "
+          f"{dataset.n_users} users, {EVAL_DRAWS} interest draws)")
     by_type = {}
     for t in range(3):
         mask = dataset.user_types == t
         if mask.any():
             by_type[t] = (random_value[mask].mean().item(), oracle_value[mask].mean().item())
     by_budget = budget_references(dataset, [k for k in run.eval_k_list if k != K], rel_draws)
-    return References(random_ref, oracle_ref, by_type, by_budget)
+    return References(random_ref, oracle_ref, by_type, by_budget, components)
 
 
 def minrel_references(dataset, random_users, random_candidates, oracle_users):
@@ -167,7 +171,7 @@ def minrel_references(dataset, random_users, random_candidates, oracle_users):
     oracle_ref = minrel_value(dataset, oracle_users, all_items).mean().item()
     print(f"[anchors] random {random_ref:.4f} ({len(random_users)} users) "
           f"oracle {oracle_ref:.4f} (greedy on all items, {len(oracle_users)} users)")
-    return References(random_ref, oracle_ref, {}, {})
+    return References(random_ref, oracle_ref, {}, {}, {})
 
 
 @torch.no_grad()
@@ -231,6 +235,7 @@ def train_policy_gradient(run):
     reward_scale = RewardScale(dataset.device)
     best_reward = float("-inf")
     frozen_log, last_sweep = None, {}
+    trained_epochs = 0
     for epoch in range(1, run.n_epochs + 1):
         sweep_epoch = epoch % SWEEP_INTERVAL == 0
         if frozen_log is not None:  # after a collapse the last record is repeated so the seed still counts
@@ -240,6 +245,7 @@ def train_policy_gradient(run):
             wandb.log(log)
             continue
         steps = [train_step(run, policy, optimizer, reward_scale) for _ in range(STEPS_PER_EPOCH)]
+        trained_epochs = epoch
         bundle = run.bundle("first_stage", policy, epoch)
         run.save(bundle, "latest.pt")
         if epoch % SNAPSHOT_INTERVAL == 0:
@@ -254,7 +260,6 @@ def train_policy_gradient(run):
         if sweep:
             last_sweep = {k: v for k, v in log.items() if k.startswith("val_")}
         wandb.log(log)
-        print(f"  [metrics ep{epoch}] " + " ".join(f"{k}={log[k]:.4f}" for k in METRICS_KEYS if k in log))
         print(f"[Epoch {epoch}] Method: {run.method} | Loss: {log['loss_policy']:.4f} "
               f"| AvgReward(batch): {log['batch_reward']:.4f} | Top1: {log['early_stage_top1_action_prob']:.4f}")
         if eval_reward > best_reward:
@@ -265,4 +270,4 @@ def train_policy_gradient(run):
             print(f"  !! collapse: eval reward {eval_reward:.4f} < {COLLAPSE_FRAC:.0%} of best {best_reward:.4f}; "
                   f"training stops and these metrics are carried forward so the seed still counts")
             frozen_log = {k: v for k, v in log.items() if not k.startswith("val_")}
-    run.save(run.bundle("first_stage", policy, run.n_epochs), "final.pt", "latest.pt")
+    run.save(run.bundle("first_stage", policy, trained_epochs), "final.pt", "latest.pt")

@@ -87,7 +87,7 @@ class MultiPreferencePolicy(nn.Module):
         E = self.item_embeddings.weight
         head_vecs = self.head_vectors(user_ids)
         alloc_probs = self.alloc_probs(user_ids)
-        P, R = self.n_pref, actions.shape[1]
+        P, L = self.n_pref, actions.shape[1]
         head_logits = torch.einsum("bpd,nd->bpn", head_vecs, E) / self.logit_temp
         with torch.no_grad():
             mixture_log_prob = torch.logsumexp(
@@ -96,9 +96,9 @@ class MultiPreferencePolicy(nn.Module):
             prefixes = torch.where(top[:, :K].unsqueeze(1) == actions.unsqueeze(-1),
                                    top[:, K].unsqueeze(1).unsqueeze(-1), top[:, :K].unsqueeze(1))
         head_log_norm = torch.logsumexp(head_logits, dim=-1)
-        prefix_logits = head_logits.unsqueeze(2).expand(-1, -1, R, -1).gather(
+        prefix_logits = head_logits.unsqueeze(2).expand(-1, -1, L, -1).gather(
             3, prefixes.unsqueeze(1).expand(-1, P, -1, -1))
-        log_norms = [head_log_norm.unsqueeze(-1).expand(-1, -1, R).unsqueeze(-1)]
+        log_norms = [head_log_norm.unsqueeze(-1).expand(-1, -1, L).unsqueeze(-1)]
         running = prefix_logits[..., 0]
         for k in range(1, K):
             norm = head_log_norm.unsqueeze(-1)
@@ -107,6 +107,6 @@ class MultiPreferencePolicy(nn.Module):
         normalizer = torch.cat(log_norms, dim=-1)
         action_logits = head_logits.gather(2, actions.unsqueeze(1).expand(-1, P, -1)).unsqueeze(-1)
         head_prob = torch.exp((action_logits - normalizer).clamp(max=-1e-6))
-        inclusion = torch.einsum("bp,bprk->brk", alloc_probs, head_prob).clamp(max=1.0 - 1e-6)
+        inclusion = torch.einsum("bp,bplk->blk", alloc_probs, head_prob).clamp(max=1.0 - 1e-6)
         log_excluded = torch.sum(torch.log1p(-inclusion), dim=-1)
         return torch.log1p(-torch.exp(log_excluded.clamp(max=-1e-6)))

@@ -5,11 +5,11 @@ import torch.nn.functional as F
 import torch.optim as optim
 import wandb
 
-from custom_obp.synthetic_bandit_dataset import REWARD_STD
-from custom_obp.cf_model import NaiveCF
-from benchmark.ope.latent_eval import search_draws, budget_references
-from benchmark.ope.train_pg import (BATCH_SIZE, STEPS_PER_EPOCH, SWEEP_INTERVAL, SNAPSHOT_INTERVAL, References,
-                                    deployment, deployment_log, serve_slates)
+from env.synthetic_bandit_dataset import REWARD_STD
+from env.cf_model import NaiveCF
+from benchmark.latent_eval import search_draws, budget_references
+from benchmark.train_pg import (BATCH_SIZE, STEPS_PER_EPOCH, SWEEP_INTERVAL, SNAPSHOT_INTERVAL, References,
+                                deployment, deployment_log, serve_slates)
 
 CF_LR = 1e-2
 CF_EPS = 0.2
@@ -23,7 +23,7 @@ def cf_references(run):
     dataset = run.dataset
     refs = budget_references(dataset, sorted(set(run.eval_k_list) | {dataset.K}), search_draws(dataset))
     random_ref, oracle_ref = refs.pop(dataset.K)
-    return References(random_ref, oracle_ref, {}, refs)
+    return References(random_ref, oracle_ref, {}, refs, {})
 
 
 def build_cf(run):
@@ -56,7 +56,7 @@ def train_naive_cf(run, feedback):
     refs = cf_references(run) if dataset.latent else None
     model, optimizer = build_cf(run)
     actions = feedback["action"]
-    rows = actions.size(1)  # 1 for single-stage logged data, R for slates
+    rows = actions.size(1)  # 1 for single-stage logged data, L for rankings
     context_flat = feedback["context"].repeat_interleave(rows, dim=0)
     actions_flat = actions.reshape(-1)
     if dataset.latent:
@@ -85,7 +85,7 @@ def train_naive_cf(run, feedback):
 
 def train_online_cf_eps(run):
     dataset = run.dataset
-    K, R = dataset.K, dataset.R
+    K, L = dataset.K, dataset.L
     refs = cf_references(run) if dataset.latent else None
     n_random = round(CF_EPS * K)
     model, optimizer = build_cf(run)
@@ -100,12 +100,13 @@ def train_online_cf_eps(run):
                 scores = cf_scores(model, context).scatter(1, random_items, float("-inf"))
                 candidates = torch.cat([random_items, scores.topk(K - n_random, dim=1).indices], dim=1)
             ranked, rewards = serve_slates(dataset, user_ids, candidates)
-            context_flat = context.repeat_interleave(R, dim=0)
+            context_flat = context.repeat_interleave(L, dim=0)
             if dataset.latent:
                 target = rewards.reshape(-1)
             else:
-                target = ((context_flat * dataset.action_context[ranked.reshape(-1)]).sum(-1)
-                          + REWARD_STD * torch.randn_like(rewards).reshape(-1))
+                ranked_flat = ranked.reshape(-1)
+                target = ((context_flat * dataset.action_context[ranked_flat]).sum(-1)
+                          + REWARD_STD * torch.randn_like(ranked_flat, dtype=torch.float32))
             behavior_rewards.append(rewards.sum(1).mean().item())
             loss = F.mse_loss(model(context_flat, ranked.reshape(-1)), target)
             optimizer.zero_grad()

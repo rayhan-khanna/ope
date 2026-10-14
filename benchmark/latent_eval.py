@@ -11,10 +11,10 @@ BUDGET_SEED_STRIDE = 7
 
 
 def rank_under_z(dataset, user_ids, candidates, z):
-    """The late stage under a realized interest: the top-R candidates by <[x; z], a>."""
+    """The late stage under a realized interest: the top-L candidates by <[x; z], a>."""
     query = torch.cat([dataset.user_context[user_ids], z], dim=-1)
     rel = (dataset.action_context[candidates] * query.unsqueeze(1)).sum(-1)
-    return candidates.gather(1, rel.topk(dataset.R, dim=1).indices)
+    return candidates.gather(1, rel.topk(dataset.L, dim=1).indices)
 
 
 def latent_value(dataset, candidates):
@@ -61,18 +61,18 @@ def search_draws(dataset):
     return torch.stack(list(relevance_draws(dataset, SEED_SEARCH, SEARCH_DRAWS)))
 
 
-def greedy_set_oracle(rel_draws, k, R):
-    """Greedy candidate set maximizing the mean over draws of the top-R relevance it contains."""
+def greedy_set_oracle(rel_draws, k, L):
+    """Greedy candidate set maximizing the mean over draws of the top-L relevance it contains."""
     U, N = rel_draws.shape[1:]
     rows = torch.arange(U, device=rel_draws.device)
     taken = torch.zeros(U, N, dtype=torch.bool, device=rel_draws.device)
     mean_rel = rel_draws.mean(0)
     chosen, picks = [], []
     for step in range(k):
-        if step < R:
+        if step < L:
             gain = mean_rel
         else:
-            tau = torch.stack(chosen, dim=-1).topk(R, dim=-1).values[..., -1]
+            tau = torch.stack(chosen, dim=-1).topk(L, dim=-1).values[..., -1]
             gain = (rel_draws - tau.unsqueeze(-1)).clamp_min(0).mean(0)
         pick = gain.masked_fill(taken, float("-inf")).argmax(1)
         picks.append(pick)
@@ -82,11 +82,13 @@ def greedy_set_oracle(rel_draws, k, R):
 
 
 def anchor_values(dataset, k, rel_draws, random_seed, oracle_seed):
-    """Per-user (random, oracle) values at budget k; the oracle is the better of the sampled and greedy sets."""
+    """Per-user values at budget k of random candidates and of the two oracle sets, sampled and greedy.
+
+    The oracle reference is the per-user better of the two oracle sets."""
     random_value = latent_value(dataset, random_candidates(dataset, k, random_seed))
     sampled = latent_value(dataset, sampled_oracle(dataset, k, oracle_seed))
-    greedy = latent_value(dataset, greedy_set_oracle(rel_draws, k, dataset.R))
-    return random_value, torch.maximum(sampled, greedy)
+    greedy = latent_value(dataset, greedy_set_oracle(rel_draws, k, dataset.L))
+    return random_value, sampled, greedy
 
 
 def budget_references(dataset, budgets, rel_draws):
@@ -94,7 +96,7 @@ def budget_references(dataset, budgets, rel_draws):
     refs = {}
     for k in budgets:
         stride = BUDGET_SEED_STRIDE * k
-        random_value, oracle_value = anchor_values(dataset, k, rel_draws, EVAL_SEED + stride, SEED_ORACLE + stride)
-        refs[k] = (random_value.mean().item(), oracle_value.mean().item())
+        random_value, sampled, greedy = anchor_values(dataset, k, rel_draws, EVAL_SEED + stride, SEED_ORACLE + stride)
+        refs[k] = (random_value.mean().item(), torch.maximum(sampled, greedy).mean().item())
         print(f"[anchors] K'={k}: random={refs[k][0]:.2f} oracle={refs[k][1]:.2f}")
     return refs

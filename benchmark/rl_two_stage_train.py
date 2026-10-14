@@ -6,24 +6,31 @@ from datetime import datetime
 import torch
 import wandb
 
-from custom_obp.synthetic_bandit_dataset import (SyntheticBanditDataset, N_ITEMS, N_LOGGED, N_MODES, ITEM_STD, X_STD,
-                                                 MAX_MODE_COS, HET_DELTA, HET_THETA_SCALE, LOGGING_TEMP, REWARD_STD)
-from benchmark.ope.train_cf import train_naive_cf, train_online_cf_eps, CF_EPS
-from benchmark.ope.train_pg import train_policy_gradient, ITEM_LR, PREF_LR
+from env.synthetic_bandit_dataset import (SyntheticBanditDataset, N_ITEMS, N_LOGGED, N_MODES, ITEM_STD, X_STD,
+                                          MAX_MODE_COS, HET_DELTA, HET_THETA_SCALE, LOGGING_TEMP, REWARD_STD)
+from benchmark.train_cf import train_naive_cf, train_online_cf_eps, CF_EPS
+from benchmark.train_pg import train_policy_gradient, ITEM_LR, PREF_LR
 
 PG_METHODS = ("online_single_pref", "online_multi_pref")
 DEFAULT_EPOCHS = 100_000
 NAIVE_CF_EPOCHS = 20_000
+DEFAULT_N_PREF = 5
 LOGIT_TEMP = {"latent": 1.0, "minrel": 0.5}
 WANDB_PROJECT = "two_stage_bandit"
 WANDB_GROUP_MAX = 127
+RUN_TAG = f"het_d{HET_DELTA:g}_hsingle_unified_mog{N_MODES}s{ITEM_STD:g}"
 
 
-def run_names(method, latent, credit, alloc, K, R, P, seed, logit_temp, minrel_lambda, stamp):
-    """wandb run and group names; the tag layout keys the logged experiments and must not change."""
+def emb_names(pg):
+    """Embedding mode and its run-name tag: per-user preference tables for the policy, a context projection for CF."""
+    return ("multi_user_emb", "muemb") if pg else ("learned_user_learned_item", "lrulri")
+
+
+def run_names(method, latent, credit, alloc, K, L, P, seed, logit_temp, minrel_lambda, stamp):
+    """wandb run and group names; the tag layout keys the logged experiments and must not change, so the
+    ranking length L is still written as R."""
     pg = method in PG_METHODS
-    tag = (f"_het_d{HET_DELTA:g}_hsingle_unified_mog{N_MODES}s{ITEM_STD:g}"
-           f"_{'v6' if latent else 'v5'}_ns{REWARD_STD:g}_rse")
+    tag = f"_{RUN_TAG}_{'v6' if latent else 'v5'}_ns{REWARD_STD:g}_rse"
     if credit == "ca":
         tag += "_ca"
     if alloc:
@@ -36,12 +43,12 @@ def run_names(method, latent, credit, alloc, K, R, P, seed, logit_temp, minrel_l
     if method == "online_cf_eps":
         tag += f"_eps{CF_EPS:g}_trel"
     reward_str = f"rmodehet_d{HET_DELTA:g}_ts{HET_THETA_SCALE:g}"
-    emb_tag = "muemb" if pg else "lrulri"
+    emb_tag = emb_names(pg)[1]
     lr_tag = f"_lr{ITEM_LR:g}-{PREF_LR:g}" if pg else ""
-    name = (f"{method}{tag}_rows{N_LOGGED}_A{N_ITEMS}_K{K}_R{R}_T{LOGGING_TEMP:g}_P{P}"
+    name = (f"{method}{tag}_rows{N_LOGGED}_A{N_ITEMS}_K{K}_R{L}_T{LOGGING_TEMP:g}_P{P}"
             f"_g{minrel_lambda:g}_seed{seed}_{reward_str}_emb{emb_tag}{lr_tag}_{stamp}")
     group_lambda = "" if latent else f"_g{minrel_lambda:g}"
-    group = f"{method}{tag}_K{K}_R{R}_P{P}{group_lambda}_{reward_str}_emb{emb_tag}{lr_tag}"[:WANDB_GROUP_MAX]
+    group = f"{method}{tag}_K{K}_R{L}_P{P}{group_lambda}_{reward_str}_emb{emb_tag}{lr_tag}"[:WANDB_GROUP_MAX]
     return name, group
 
 
@@ -65,6 +72,7 @@ class Run:
                "user_embeddings": dataset.user_context, "user_types": dataset.user_types,
                "meta": dict(self.meta, epoch=epoch)}
         if not dataset.latent:
+            out["Theta"] = dataset.theta
             out["user_w_rel"], out["user_w_div"] = dataset.user_w_rel, dataset.user_w_div
         return out
 
@@ -79,12 +87,14 @@ class Run:
 def train(method, seed, setting, credit, top_k, ranking_size, n_pref, eval_k_list, minrel_lambda, n_epochs):
     """Resolve one run's configuration, build its dataset and train it."""
     latent = setting == "latent"
+    pg = method in PG_METHODS
     if credit is None:
-        credit = "ca" if latent else "joint"
-    if method not in PG_METHODS:
-        credit = "joint"
+        credit = "ca" if latent and pg else "joint"
+    if credit == "ca" and not (latent and pg):
+        raise ValueError("--credit ca is the latent setting's policy-gradient estimator: the min-rel reward is not "
+                         "additive per item, and the CF baselines take no estimator")
     alloc = method == "online_multi_pref" and credit == "ca"
-    logit_temp = LOGIT_TEMP[setting]
+    logit_temp = LOGIT_TEMP[setting] if pg else 1.0
     minrel_lambda = 0.0 if latent else minrel_lambda
     if n_epochs is None:
         n_epochs = NAIVE_CF_EPOCHS if method == "naive_cf" else DEFAULT_EPOCHS
@@ -92,20 +102,31 @@ def train(method, seed, setting, credit, top_k, ranking_size, n_pref, eval_k_lis
 
     torch.manual_seed(seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    dataset = SyntheticBanditDataset(setting, K=top_k, seed=seed, R=ranking_size, minrel_lambda=minrel_lambda,
+    dataset = SyntheticBanditDataset(setting, K=top_k, seed=seed, L=ranking_size, minrel_lambda=minrel_lambda,
                                      device=device)
     feedback = dataset.logged_feedback(single_stage=(method == "naive_cf"))
-    K, R = top_k, ranking_size
-    P = 1 if method == "online_single_pref" else (n_pref if method == "online_multi_pref" else 0)
+    K, L = top_k, ranking_size
+    if method == "online_multi_pref":
+        P = DEFAULT_N_PREF if n_pref is None else n_pref
+    else:
+        P = 1 if method == "online_single_pref" else 0
 
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
-    name, group = run_names(method, latent, credit, alloc, K, R, P, seed, logit_temp, minrel_lambda, stamp)
+    name, group = run_names(method, latent, credit, alloc, K, L, P, seed, logit_temp, minrel_lambda, stamp)
     run_dir = os.path.join("checkpoints", name)
     os.makedirs(run_dir, exist_ok=True)
-    print(f"[setup] {method} setting={setting} K={K} R={R} P={P} credit={credit} alloc={alloc} seed={seed} "
+    print(f"[setup] {method} setting={setting} K={K} L={L} P={P} credit={credit} alloc={alloc} seed={seed} "
           f"n_epochs={n_epochs} -> {run_dir}")
-    meta = {"method": method, "setting": setting, "seed": seed, "K": K, "R": R, "P": P, "credit": credit,
-            "alloc": alloc, "minrel_lambda": minrel_lambda, "n_epochs": n_epochs}
+    # the reported runs' wandb config, without the keys of removed features, so new runs line up with them
+    emb_mode, emb_tag = emb_names(pg)
+    meta = {"method": method, "seed": seed, "n_epochs": n_epochs, "rows": N_LOGGED, "n_actions": N_ITEMS,
+            "top_k": K, "temperature": LOGGING_TEMP, "P": P, "emb_dim": dataset.action_context.shape[1],
+            "run_tag": RUN_TAG, "credit": credit, "alloc": alloc, "emb_mode": emb_mode, "emb_tag": emb_tag,
+            "reward_mode": "heterogeneous", "het_delta": HET_DELTA, "het_theta_scale": HET_THETA_SCALE,
+            "cf_eps": CF_EPS, "reward_noise_std": REWARD_STD, "minrel_reward": not latent,
+            "minrel_lambda": minrel_lambda, "logit_temp": logit_temp, "minrel_relu": not latent, "run_dir": run_dir}
+    if pg:
+        meta.update(item_lr_learned=ITEM_LR, pref_lr_learned=PREF_LR)
     wandb.init(project=WANDB_PROJECT, name=name, group=group, settings=wandb.Settings(init_timeout=300), config=meta)
     run = Run(dataset=dataset, method=method, credit=credit, alloc=alloc, P=P, logit_temp=logit_temp,
               n_epochs=n_epochs, eval_k_list=eval_k_list, run_dir=run_dir, meta=meta)

@@ -32,9 +32,9 @@ def regular_simplex(n, dim):
 class SyntheticBanditDataset:
     """Synthetic users and items; `latent` draws a hidden interest per interaction, `minrel` pays a diversity bonus."""
 
-    def __init__(self, setting, K, seed, R, minrel_lambda, device):
+    def __init__(self, setting, K, seed, L, minrel_lambda, device):
         self.latent = setting == "latent"
-        self.K, self.R = K, R
+        self.K, self.L = K, L
         self.minrel_lambda = minrel_lambda
         self.device = device
         self.rng = np.random.RandomState(seed)
@@ -103,7 +103,7 @@ class SyntheticBanditDataset:
               f"users peaked/flat/mid = {counts[0]}/{counts[1]}/{counts[2]}")
 
     def sample_z(self, user_ids, generator=None):
-        """One interest draw per user; a CPU generator makes evaluation draws identical everywhere."""
+        """One interest draw per user; evaluation passes a seeded CPU generator, so its draws are device-independent."""
         draw_device = self.device if generator is None else "cpu"
         w = self.user_z_weights[user_ids].to(draw_device)
         mode = torch.multinomial(w, 1, generator=generator).squeeze(1).to(self.device)
@@ -119,28 +119,28 @@ class SyntheticBanditDataset:
 
     def diversity(self, slates, user_ids):
         """Relevance-gated mean pairwise dissimilarity of each slate, the min-rel bonus term."""
-        R = slates.shape[1]
+        L = slates.shape[1]
         rel, dist = self.relevance_and_distance(user_ids, slates)
         rel = rel.clamp_min(0.0)
         gate = torch.minimum(rel.unsqueeze(2), rel.unsqueeze(1))
-        upper = torch.triu(torch.ones(R, R, dtype=torch.bool, device=slates.device), diagonal=1)
-        return (gate * dist * upper).sum(dim=(1, 2)) / (R * (R - 1) / 2)
+        upper = torch.triu(torch.ones(L, L, dtype=torch.bool, device=slates.device), diagonal=1)
+        return (gate * dist * upper).sum(dim=(1, 2)) / (L * (L - 1) / 2)
 
     def reward(self, user_ids, ranked, noisy=False, z=None):
         """Per-position reward of each user's ranked slate."""
-        R = ranked.shape[1]
-        idx = user_ids.repeat_interleave(R)
+        L = ranked.shape[1]
+        idx = user_ids.repeat_interleave(L)
         items = self.action_context[ranked.reshape(-1)]
         users = self.user_context[idx]
         if self.latent:
-            expected = torch.sum(torch.cat([users, z.repeat_interleave(R, dim=0)], dim=-1) * items, dim=1)
+            expected = torch.sum(torch.cat([users, z.repeat_interleave(L, dim=0)], dim=-1) * items, dim=1)
         else:
             relevance = torch.sum(users * items, dim=1)
-            div = self.diversity(ranked, user_ids).repeat_interleave(R)
+            div = self.diversity(ranked, user_ids).repeat_interleave(L)
             expected = 2.0 * self.user_w_rel[idx] * relevance + 2.0 * self.user_w_div[idx] * (self.minrel_lambda * div)
         if noisy:
             expected = expected + torch.randn_like(expected) * REWARD_STD
-        return expected.view(-1, R)
+        return expected.view(-1, L)
 
     def sample_logging_action(self, context_row):
         probs = torch.softmax((context_row.unsqueeze(0) @ self.action_context.T) / LOGGING_TEMP, dim=-1)[0]
@@ -164,7 +164,7 @@ class SyntheticBanditDataset:
             candidates = torch.topk(scores + g1, self.K, dim=1).indices
             cs = scores.gather(1, candidates)
             g2 = -torch.log(-torch.log(torch.rand_like(cs)))
-            ranked = candidates.gather(1, (cs + g2).topk(self.R, dim=1).indices)
+            ranked = candidates.gather(1, (cs + g2).topk(self.L, dim=1).indices)
             rewards = self.reward(user_ids, ranked, noisy=True, z=self.sample_z(user_ids))
             return {"context": context, "action": ranked, "reward": rewards}
         if single_stage:
@@ -176,4 +176,4 @@ class SyntheticBanditDataset:
         for _ in range(N_LOGGED):
             torch.empty(self.K, device=self.device).exponential_()
         for _ in range(N_LOGGED):
-            torch.randn(self.R, device=self.device)
+            torch.randn(self.L, device=self.device)
