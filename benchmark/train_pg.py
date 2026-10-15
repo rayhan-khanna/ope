@@ -1,4 +1,7 @@
-"""Policy-gradient training of the retrieval policy, plus the deployment and logging the CF baselines share."""
+"""Policy-gradient training of the retrieval policy, plus the deployment and logging the CF baselines share.
+
+Shapes: U users, B users in a batch, K candidates, L ranked items.
+"""
 from collections import namedtuple
 
 import numpy as np
@@ -15,6 +18,8 @@ from benchmark.latent_eval import (latent_value, rank_under_z, search_draws, anc
                                    SEED_RANDOM, SEED_ORACLE, EVAL_DRAWS)
 
 ITEM_LR, PREF_LR = 0.01, 0.03
+# credit-assigned estimators: ca_swr under sampling with replacement (the default), ca without it (the earlier runs)
+CA_CREDITS = ("ca_swr", "ca")
 BATCH_SIZE = 128
 STEPS_PER_EPOCH = 10
 SWEEP_INTERVAL = 10
@@ -43,7 +48,24 @@ def relative(value, random, oracle):
 
 
 def candidate_diversity(dataset, candidates):
-    """Diversity of every user's candidate set: clusters covered, and interest mass or pairwise dissimilarity."""
+    """Diversity of every user's candidate set: clusters covered, and interest mass or pairwise dissimilarity.
+
+    Input
+    ------
+    dataset: SyntheticBanditDataset
+        The environment.
+
+    candidates: torch.Tensor, shape (U, K)
+        The candidate set of every user.
+
+    Output
+    ------
+    diversity: dict of str to torch.Tensor, each of shape (U, )
+        "eff_clusters" and "n_clusters", the effective and the plain number of item clusters covered; latent:
+        "mass_covered" and "mass_full", the interest mass of the modes with at least one and at least L candidates;
+        min-rel: "pair_div" and "pair_div_gated", the mean pairwise dissimilarity, plain and relevance-gated.
+
+    """
     K = candidates.shape[1]
     counts = F.one_hot(dataset.item_cluster_assignments[candidates], N_MODES).sum(1).float()
     share = counts / K
@@ -63,7 +85,23 @@ def candidate_diversity(dataset, candidates):
 
 
 def deployment(dataset, candidates):
-    """Value of every user's candidate set under the fixed late stage."""
+    """Value of every user's candidate set under the fixed late stage.
+
+    Input
+    ------
+    dataset: SyntheticBanditDataset
+        The environment.
+
+    candidates: torch.Tensor, shape (U, K)
+        The candidate set of every user.
+
+    Output
+    ------
+    deploy: Deploy
+        "reward" (U, ), the expected reward of each user's ranking; "rel" and "div" (U, ), the min-rel reward's two
+        legs (None in the latent setting); "candidates" (U, K), the input.
+
+    """
     if dataset.latent:
         return Deploy(latent_value(dataset, candidates), None, None, candidates)
     user_ids = torch.arange(dataset.n_users, device=dataset.device)
@@ -99,7 +137,28 @@ def deployment_log(dataset, refs, deploy, sweep):
 
 
 def serve_slates(dataset, user_ids, candidates):
-    """The late stage ranks each user's candidates and the user returns noisy per-position rewards."""
+    """The late stage ranks each user's candidates and the user returns noisy per-position rewards.
+
+    Input
+    ------
+    dataset: SyntheticBanditDataset
+        The environment.
+
+    user_ids: torch.Tensor, shape (B, )
+        The users.
+
+    candidates: torch.Tensor, shape (B, K)
+        Each user's candidate set.
+
+    Output
+    ------
+    ranked: torch.Tensor, shape (B, L)
+        The ranking the late stage builds; in the latent setting under a freshly drawn interest.
+
+    rewards: torch.Tensor, shape (B, L)
+        The observed reward of each position, with noise.
+
+    """
     if dataset.latent:
         z = dataset.sample_z(user_ids)
         ranked = rank_under_z(dataset, user_ids, candidates, z)
@@ -116,6 +175,22 @@ class RewardScale:
         self.seen = torch.zeros(3, dtype=torch.bool, device=device)
 
     def update(self, slate_reward, types):
+        """Update each type's running RMS with a batch and return the batch's scales.
+
+        Input
+        ------
+        slate_reward: torch.Tensor, shape (B, )
+            The observed reward of each user's ranking.
+
+        types: torch.Tensor, shape (B, )
+            The type of each user.
+
+        Output
+        ------
+        scale: torch.Tensor, shape (B, )
+            Each user's type scale divided by the mean over the types seen so far; rewards are divided by it.
+
+        """
         for t in range(3):
             mask = types == t
             if mask.any():
@@ -176,13 +251,57 @@ def minrel_references(dataset, random_users, random_candidates, oracle_users):
 
 @torch.no_grad()
 def evaluate(dataset, policy, k):
-    """Greedy deployment of the policy at budget k on every user."""
+    """Greedy deployment of the policy at budget k on every user.
+
+    Input
+    ------
+    dataset: SyntheticBanditDataset
+        The environment.
+
+    policy: MultiPreferencePolicy
+        The retrieval policy.
+
+    k: int
+        The deploy-time candidate-set size.
+
+    Output
+    ------
+    deploy: Deploy
+        As returned by deployment, for the policy's greedy candidate sets of size k.
+
+    """
     user_ids = torch.arange(dataset.n_users, device=dataset.device)
     return deployment(dataset, policy.retrieve(user_ids, k, greedy=True)[0])
 
 
 def train_step(run, policy, optimizer, reward_scale):
-    """One policy-gradient update on a fresh batch of users."""
+    """One policy-gradient update on a fresh batch of users.
+
+    CA-PG minimises −Σ_l (r_l / scale) · log p(a_l), with log p from log_pick_prob (ca_swr) or log_inclusion_prob
+    (ca). Vanilla policy gradient minimises −(Σ_l r_l / scale) · log P(candidates), with log P from
+    log_prob_candidates.
+
+    Input
+    ------
+    run: Run
+        The run's dataset and configuration.
+
+    policy: MultiPreferencePolicy
+        The retrieval policy.
+
+    optimizer: torch.optim.Optimizer
+        The optimizer of the policy.
+
+    reward_scale: RewardScale
+        The running per-type reward scale.
+
+    Output
+    ------
+    stats: dict
+        "loss" (float); "slate_rewards", the B observed ranking rewards (list of float); "top1_prob" (B, ), the
+        probability of the first pick's most likely item; "batch_types" (B, ), the users' types.
+
+    """
     dataset = run.dataset
     user_ids = dataset.sample_users(BATCH_SIZE)
     candidates, pick_vecs = policy.retrieve(user_ids, dataset.K, greedy=False)
@@ -190,8 +309,9 @@ def train_step(run, policy, optimizer, reward_scale):
     slate_reward = position_rewards.sum(dim=1)
     batch_types = dataset.user_types[user_ids]
     scale = reward_scale.update(slate_reward, batch_types)
-    if run.credit == "ca":
-        log_incl = policy.log_inclusion_prob(user_ids, ranked, dataset.K)
+    if run.credit in CA_CREDITS:
+        log_incl = (policy.log_pick_prob(user_ids, ranked) if run.credit == "ca_swr"
+                    else policy.log_inclusion_prob(user_ids, ranked, dataset.K))
         loss = -((position_rewards / scale.unsqueeze(1)) * log_incl).sum(1).mean()
     else:
         log_prob = policy.log_prob_candidates(candidates, pick_vecs)

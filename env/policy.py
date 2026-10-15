@@ -1,3 +1,7 @@
+"""The early-stage ranker (ESR).
+
+Shapes: B users in a batch, U users, N items, D embedding size, P preference vectors, K candidates, L ranked items.
+"""
 import torch
 import torch.nn as nn
 
@@ -8,7 +12,35 @@ def gumbel_like(x):
 
 
 class MultiPreferencePolicy(nn.Module):
-    """Retrieval policy: n_pref preference vectors per user scored against a learned item table."""
+    """Retrieval policy: n_pref preference vectors per user scored against a learned item table.
+
+    Model p scores item a for user u as <w_{u,p}, E_a> / logit_temp: the vectors w_{u,p} are free parameters of each
+    user, and all models share one learned item embedding table E.
+
+    Input
+    ------
+    n_users: int
+        The number of users, U.
+
+    n_items: int
+        The number of items, N.
+
+    emb_dim: int
+        The embedding size, D.
+
+    n_pref: int
+        The number of preference vectors per user, P.
+
+    logit_temp: float
+        The softmax temperature of the scores.
+
+    single: bool
+        Whether this is the single-preference policy (P = 1).
+
+    alloc: bool
+        Whether each pick draws its vector from the learned allocation instead of taking turns (round-robin).
+
+    """
 
     def __init__(self, n_users, n_items, emb_dim, n_pref, logit_temp, single, alloc):
         super().__init__()
@@ -22,14 +54,55 @@ class MultiPreferencePolicy(nn.Module):
         self.alloc_logits = nn.Embedding.from_pretrained(torch.zeros(n_users, n_pref), freeze=False)
 
     def head_vectors(self, user_ids):
+        """Preference vectors of each user.
+
+        Input
+        ------
+        user_ids: torch.Tensor, shape (B, )
+            The users.
+
+        Output
+        ------
+        head_vectors: torch.Tensor, shape (B, P, D)
+            The P preference vectors of each user.
+
+        """
         flat = self.user_embeddings(user_ids)
         return flat.view(flat.size(0), self.n_pref, -1)
 
     def alloc_probs(self, user_ids):
+        """Learned allocation over each user's preference vectors.
+
+        Input
+        ------
+        user_ids: torch.Tensor, shape (B, )
+            The users.
+
+        Output
+        ------
+        alloc_probs: torch.Tensor, shape (B, P)
+            The allocation π, a softmax over each user's vectors (1 for the single-preference policy).
+
+        """
         return torch.softmax(self.alloc_logits(user_ids), dim=-1)
 
     def alloc_counts(self, user_ids, K):
-        """Largest-remainder rounding of K * alloc_probs; rows sum to K."""
+        """Largest-remainder rounding of K * alloc_probs; rows sum to K.
+
+        Input
+        ------
+        user_ids: torch.Tensor, shape (B, )
+            The users.
+
+        K: int
+            The candidate-set size.
+
+        Output
+        ------
+        counts: torch.Tensor, shape (B, P)
+            The number of candidate slots given to each vector.
+
+        """
         pi = self.alloc_probs(user_ids)
         raw = pi * K
         base = raw.floor().long()
@@ -41,7 +114,32 @@ class MultiPreferencePolicy(nn.Module):
         return base + bump
 
     def retrieve(self, user_ids, K, greedy):
-        """K distinct items per user, sampled or greedy; heads are chosen in turn or by the learned allocation."""
+        """K distinct items per user, sampled or greedy.
+
+        Each pick uses one preference vector: in turn (round-robin), or drawn from the allocation π when sampling, or
+        by its largest-remainder counts when greedy. The pick then samples from that vector's softmax over the items
+        not yet picked (Gumbel-max), or takes its argmax when greedy.
+
+        Input
+        ------
+        user_ids: torch.Tensor, shape (B, )
+            The users.
+
+        K: int
+            The candidate-set size.
+
+        greedy: bool
+            Whether to take the most likely item at each pick instead of sampling.
+
+        Output
+        ------
+        candidates: torch.Tensor, shape (B, K)
+            The item chosen at each pick, distinct within each row.
+
+        pick_vecs: torch.Tensor, shape (B, K, D)
+            The preference vector behind each pick.
+
+        """
         device = user_ids.device
         E = self.item_embeddings.weight
         B, P = user_ids.size(0), self.n_pref
@@ -76,14 +174,80 @@ class MultiPreferencePolicy(nn.Module):
         return candidates, torch.stack(pick_vecs, dim=1)
 
     def log_prob_candidates(self, candidates, pick_vecs):
-        """Joint log-probability of the K picks, each a softmax of its own preference vector."""
+        """Joint log-probability of the K picks, each a softmax of its own preference vector.
+
+        This is the vanilla policy-gradient term under sampling with replacement (SwR): the normaliser of every pick
+        covers all N items.
+
+        Input
+        ------
+        candidates: torch.Tensor, shape (B, K)
+            The item chosen at each pick.
+
+        pick_vecs: torch.Tensor, shape (B, K, D)
+            The preference vector behind each pick.
+
+        Output
+        ------
+        log_prob: torch.Tensor, shape (B, )
+            The SwR log-probability of each user's K ordered picks.
+
+        """
         E = self.item_embeddings.weight
         logits = torch.einsum("bkd,nd->bkn", pick_vecs, E) / self.logit_temp
         chosen = logits.gather(2, candidates.unsqueeze(2)).squeeze(2)
         return (chosen - torch.logsumexp(logits, dim=2)).sum(dim=1)
 
+    def log_pick_prob(self, user_ids, actions):
+        """Credit-assigned log-probability of each ranked item under sampling with replacement (SwR).
+
+        It is the chance that one pick selects the item: the allocation-weighted mixture of the vectors' softmaxes
+        over all items.
+
+        Input
+        ------
+        user_ids: torch.Tensor, shape (B, )
+            The users.
+
+        actions: torch.Tensor, shape (B, L)
+            The ranked items.
+
+        Output
+        ------
+        log_prob: torch.Tensor, shape (B, L)
+            log Σ_p π_p softmax_p(a) for each ranked item a.
+
+        """
+        head_logits = torch.einsum("bpd,nd->bpn", self.head_vectors(user_ids), self.item_embeddings.weight)
+        log_mixture = torch.logsumexp(torch.log_softmax(head_logits / self.logit_temp, dim=-1)
+                                      + self.alloc_probs(user_ids).clamp_min(1e-12).log().unsqueeze(-1), dim=1)
+        return log_mixture.gather(1, actions)
+
     def log_inclusion_prob(self, user_ids, actions, K):
-        """Credit-assigned log-probability that each ranked item is retrieved."""
+        """Credit-assigned log-probability that each ranked item is retrieved, without the SwR approximation.
+
+        The history of each ranked item is the top K items under the π-weighted mixture, with the item itself replaced
+        by the (K+1)-th, as in the reference implementation. Pick k = 0, …, K − 1 selects the item with probability
+        p_k, the π-weighted mixture of the vectors' softmaxes without the first k history items; the item is retrieved
+        with probability 1 − Π_k (1 − p_k).
+
+        Input
+        ------
+        user_ids: torch.Tensor, shape (B, )
+            The users.
+
+        actions: torch.Tensor, shape (B, L)
+            The ranked items.
+
+        K: int
+            The candidate-set size.
+
+        Output
+        ------
+        log_prob: torch.Tensor, shape (B, L)
+            The log-probability that each ranked item is in the candidate set.
+
+        """
         E = self.item_embeddings.weight
         head_vecs = self.head_vectors(user_ids)
         alloc_probs = self.alloc_probs(user_ids)

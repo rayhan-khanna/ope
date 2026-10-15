@@ -1,3 +1,8 @@
+"""Synthetic users, items, logged data and rewards for the latent and min-rel settings.
+
+Shapes: U users, N items, B users in a batch, K candidates, L ranked items. Contexts and interests have DIM entries;
+items have 2·DIM in the latent setting ([x part; z part]) and DIM in min-rel.
+"""
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -21,7 +26,22 @@ REWARD_STD = 1.0
 
 
 def regular_simplex(n, dim):
-    """n unit vectors in R^dim that sum to zero with pairwise cosine -1/(n-1)."""
+    """n unit vectors in R^dim that sum to zero with pairwise cosine -1/(n-1).
+
+    Input
+    ------
+    n: int
+        The number of vectors.
+
+    dim: int
+        The dimension of each vector (at least n - 1).
+
+    Output
+    ------
+    vectors: numpy.ndarray, shape (n, dim)
+        The unit vectors.
+
+    """
     V = np.eye(n) - 1.0 / n
     basis = np.linalg.svd(V)[2][:n - 1].T
     out = np.zeros((n, dim))
@@ -30,7 +50,58 @@ def regular_simplex(n, dim):
 
 
 class SyntheticBanditDataset:
-    """Synthetic users and items; `latent` draws a hidden interest per interaction, `minrel` pays a diversity bonus."""
+    """Synthetic users and items; `latent` draws a hidden interest per interaction, `minrel` pays a diversity bonus.
+
+    The constructor draws the items and the parameters of the users' interests or types; `logged_feedback`, which
+    every run calls once, creates the users.
+
+    Input
+    ------
+    setting: str
+        Either "latent" or "minrel".
+
+    K: int
+        The candidate-set size.
+
+    seed: int
+        The seed of the environment's numpy generator.
+
+    L: int
+        The ranking length.
+
+    minrel_lambda: float
+        The scale of the min-rel diversity bonus (0 in the latent setting).
+
+    device: torch.device
+        The device of the environment's tensors.
+
+    Attributes
+    ------
+    action_context: torch.Tensor, shape (N, 2·DIM) or (N, DIM)
+        The item vectors.
+
+    item_cluster_assignments: torch.Tensor, shape (N, )
+        The mode (cluster) of each item.
+
+    user_context: torch.Tensor, shape (U, DIM)
+        The user contexts x.
+
+    user_types: torch.Tensor, shape (U, )
+        The type of each user: peaked, flat or mid (latent); relevance-heavy, diversity-heavy or balanced (min-rel).
+
+    mode_centers: torch.Tensor, shape (N_MODES, DIM)
+        Latent only: the centres of the interest modes.
+
+    user_z_weights: torch.Tensor, shape (U, N_MODES)
+        Latent only: each user's mixture over the interest modes.
+
+    user_w_rel: torch.Tensor, shape (U, )
+        Min-rel only: each user's relevance weight w_rel.
+
+    user_w_div: torch.Tensor, shape (U, )
+        Min-rel only: each user's diversity weight w_div = 1 − w_rel.
+
+    """
 
     def __init__(self, setting, K, seed, L, minrel_lambda, device):
         self.latent = setting == "latent"
@@ -103,7 +174,22 @@ class SyntheticBanditDataset:
               f"users peaked/flat/mid = {counts[0]}/{counts[1]}/{counts[2]}")
 
     def sample_z(self, user_ids, generator=None):
-        """One interest draw per user; evaluation passes a seeded CPU generator, so its draws are device-independent."""
+        """One interest draw per user; evaluation passes a seeded CPU generator, so its draws are device-independent.
+
+        Input
+        ------
+        user_ids: torch.Tensor, shape (B, )
+            The users.
+
+        generator: torch.Generator or None
+            A seeded CPU generator for evaluation draws, or None for training draws.
+
+        Output
+        ------
+        z: torch.Tensor, shape (B, DIM)
+            A mode drawn from each user's mixture, plus Gaussian noise with standard deviation Z_SIGMA.
+
+        """
         draw_device = self.device if generator is None else "cpu"
         w = self.user_z_weights[user_ids].to(draw_device)
         mode = torch.multinomial(w, 1, generator=generator).squeeze(1).to(self.device)
@@ -111,14 +197,49 @@ class SyntheticBanditDataset:
         return self.mode_centers[mode] + Z_SIGMA * eps
 
     def relevance_and_distance(self, user_ids, items):
-        """Relevance <x, a> of each user's items, and the pairwise cosine distance between those items."""
+        """Relevance <x, a> of each user's items, and the pairwise cosine distance between those items.
+
+        Min-rel only: latent items have 2·DIM entries.
+
+        Input
+        ------
+        user_ids: torch.Tensor, shape (B, )
+            The users.
+
+        items: torch.Tensor, shape (B, M)
+            M items per user.
+
+        Output
+        ------
+        rel: torch.Tensor, shape (B, M)
+            The relevance of each item to its user.
+
+        dist: torch.Tensor, shape (B, M, M)
+            1 − cos(a_i, a_j) for every pair of a user's items.
+
+        """
         emb = self.action_context[items]
         unit = F.normalize(emb, dim=-1)
         rel = (self.user_context[user_ids].unsqueeze(1) * emb).sum(-1)
         return rel, 1.0 - unit @ unit.transpose(1, 2)
 
     def diversity(self, slates, user_ids):
-        """Relevance-gated mean pairwise dissimilarity of each slate, the min-rel bonus term."""
+        """Relevance-gated mean pairwise dissimilarity of each slate, the min-rel bonus term.
+
+        Input
+        ------
+        slates: torch.Tensor, shape (B, L)
+            The ranked items.
+
+        user_ids: torch.Tensor, shape (B, )
+            The users.
+
+        Output
+        ------
+        div: torch.Tensor, shape (B, )
+            The mean over item pairs of min(relu rel_i, relu rel_j) · (1 − cos(a_i, a_j)).
+
+        """
         L = slates.shape[1]
         rel, dist = self.relevance_and_distance(user_ids, slates)
         rel = rel.clamp_min(0.0)
@@ -127,7 +248,30 @@ class SyntheticBanditDataset:
         return (gate * dist * upper).sum(dim=(1, 2)) / (L * (L - 1) / 2)
 
     def reward(self, user_ids, ranked, noisy=False, z=None):
-        """Per-position reward of each user's ranked slate."""
+        """Per-position reward of each user's ranked slate.
+
+        Latent: <[x; z], a_l>. Min-rel: 2·w_rel·<x, a_l> + 2·w_div·minrel_lambda·diversity(ranked).
+
+        Input
+        ------
+        user_ids: torch.Tensor, shape (B, )
+            The users.
+
+        ranked: torch.Tensor, shape (B, L)
+            The ranked items.
+
+        noisy: bool
+            Whether to add N(0, REWARD_STD²) noise to each position, as the learner observes it.
+
+        z: torch.Tensor, shape (B, DIM)
+            Latent only: the realized interest of each interaction.
+
+        Output
+        ------
+        reward: torch.Tensor, shape (B, L)
+            The reward of each position.
+
+        """
         L = ranked.shape[1]
         idx = user_ids.repeat_interleave(L)
         items = self.action_context[ranked.reshape(-1)]
@@ -147,7 +291,26 @@ class SyntheticBanditDataset:
         return torch.multinomial(probs, 1).item()
 
     def logged_feedback(self, single_stage):
-        """Create the users and the softmax-policy log naive_cf trains on: slates (latent) or single items (min-rel)."""
+        """Create the users and the softmax-policy log naive_cf trains on: slates (latent) or single items (min-rel).
+
+        The log has N_LOGGED interactions, N_LOGGED / N_USERS per user in shuffled order. Latent: a two-stage softmax
+        policy at temperature LOGGING_TEMP over <[x; z̄], a>, with z̄ the user's mean interest, samples K candidates and
+        then L of them; each interaction draws one interest, shared by its L positions, and each position adds noise.
+        Min-rel: one item per interaction from a softmax at temperature LOGGING_TEMP over <x, a>.
+
+        Input
+        ------
+        single_stage: bool
+            Min-rel only: whether to log single items (naive_cf) rather than replay the slate log's random draws.
+
+        Output
+        ------
+        feedback: dict or None
+            Latent: "context" (N_LOGGED, DIM), "action" (N_LOGGED, L) and "reward" (N_LOGGED, L).
+            Min-rel with single_stage: "context" (N_LOGGED, DIM) and "action" (N_LOGGED, 1).
+            Min-rel otherwise: None.
+
+        """
         self.n_users = N_USERS
         self.user_context = self.sample_context(N_USERS)
         if self.latent:

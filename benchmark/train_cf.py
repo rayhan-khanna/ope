@@ -1,4 +1,7 @@
-"""The CF baselines, offline regression and online epsilon-greedy; in min-rel they regress item relevance."""
+"""The CF baselines, offline regression and online epsilon-greedy; in min-rel they regress item relevance.
+
+Shapes: B users in a batch, N items, DIM context entries.
+"""
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -33,6 +36,22 @@ def build_cf(run):
 
 
 def cf_scores(model, context):
+    """Scores of every item for each context.
+
+    Input
+    ------
+    model: NaiveCF
+        The CF scorer.
+
+    context: torch.Tensor, shape (B, DIM)
+        The user contexts.
+
+    Output
+    ------
+    scores: torch.Tensor, shape (B, N)
+        <W x + b, e_a> for every item a.
+
+    """
     return model.project_context(context) @ model.item_embedding.weight.T
 
 

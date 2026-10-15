@@ -1,4 +1,7 @@
-"""Train one run: a policy-gradient retrieval policy or a CF baseline, in the latent or min-rel setting."""
+"""Train one run: a policy-gradient retrieval policy or a CF baseline, in the latent or min-rel setting.
+
+Shapes: U users, N items, DIM context entries.
+"""
 import os
 from dataclasses import dataclass
 from datetime import datetime
@@ -9,7 +12,7 @@ import wandb
 from env.synthetic_bandit_dataset import (SyntheticBanditDataset, N_ITEMS, N_LOGGED, N_MODES, ITEM_STD, X_STD,
                                           MAX_MODE_COS, HET_DELTA, HET_THETA_SCALE, LOGGING_TEMP, REWARD_STD)
 from benchmark.train_cf import train_naive_cf, train_online_cf_eps, CF_EPS
-from benchmark.train_pg import train_policy_gradient, ITEM_LR, PREF_LR
+from benchmark.train_pg import train_policy_gradient, ITEM_LR, PREF_LR, CA_CREDITS
 
 PG_METHODS = ("online_single_pref", "online_multi_pref")
 DEFAULT_EPOCHS = 100_000
@@ -31,8 +34,8 @@ def run_names(method, latent, credit, alloc, K, L, P, seed, logit_temp, minrel_l
     ranking length L is still written as R."""
     pg = method in PG_METHODS
     tag = f"_{RUN_TAG}_{'v6' if latent else 'v5'}_ns{REWARD_STD:g}_rse"
-    if credit == "ca":
-        tag += "_ca"
+    if credit in CA_CREDITS:
+        tag += "_caswr" if credit == "ca_swr" else "_ca"
     if alloc:
         tag += "_alloc"
     if pg:
@@ -67,6 +70,29 @@ class Run:
     meta: dict
 
     def bundle(self, key, module, epoch):
+        """Checkpoint contents: the trained model and the environment's ground truth.
+
+        Input
+        ------
+        key: str
+            The checkpoint key of the model: "first_stage" for the policy, "naive_cf" for the CF scorer.
+
+        module: torch.nn.Module
+            The trained model.
+
+        epoch: int
+            The last trained epoch.
+
+        Output
+        ------
+        bundle: dict
+            key: the model's state_dict; "action_context" (N, 2·DIM) latent or (N, DIM) min-rel, the true item vectors;
+            "user_embeddings" (U, DIM), the true user contexts x; "user_types" (U, ), each user's type 0, 1 or 2 (see
+            SyntheticBanditDataset); "meta", the wandb config plus the epoch; min-rel only: "Theta" (DIM, 3), the
+            user-type parameters, and "user_w_rel", "user_w_div" (U, ). The latent interest model (mode_centers,
+            user_z_weights) is not saved.
+
+        """
         dataset = self.dataset
         out = {key: module.state_dict(), "action_context": dataset.action_context,
                "user_embeddings": dataset.user_context, "user_types": dataset.user_types,
@@ -89,11 +115,11 @@ def train(method, seed, setting, credit, top_k, ranking_size, n_pref, eval_k_lis
     latent = setting == "latent"
     pg = method in PG_METHODS
     if credit is None:
-        credit = "ca" if latent and pg else "joint"
-    if credit == "ca" and not (latent and pg):
-        raise ValueError("--credit ca is the latent setting's policy-gradient estimator: the min-rel reward is not "
+        credit = "ca_swr" if latent and pg else "joint"
+    if credit in CA_CREDITS and not (latent and pg):
+        raise ValueError(f"--credit {credit} is a latent-setting policy-gradient estimator: the min-rel reward is not "
                          "additive per item, and the CF baselines take no estimator")
-    alloc = method == "online_multi_pref" and credit == "ca"
+    alloc = method == "online_multi_pref" and credit in CA_CREDITS
     logit_temp = LOGIT_TEMP[setting] if pg else 1.0
     minrel_lambda = 0.0 if latent else minrel_lambda
     if n_epochs is None:

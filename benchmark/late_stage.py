@@ -1,9 +1,30 @@
-"""Greedy late stage of the min-rel setting and the slate values built on it."""
+"""Greedy late stage of the min-rel setting and the slate values built on it.
+
+Shapes: B users in a batch, K candidates, L ranked items.
+"""
 import torch
 
 
 def greedy_slate(dataset, user_ids, candidates):
-    """Pick L of the candidates greedily on each user's weighted relevance-plus-diversity objective."""
+    """Pick L of the candidates greedily on each user's weighted relevance-plus-diversity objective.
+
+    Input
+    ------
+    dataset: SyntheticBanditDataset
+        The environment (min-rel).
+
+    user_ids: torch.Tensor, shape (B, )
+        The users.
+
+    candidates: torch.Tensor, shape (B, K)
+        Each user's candidate set.
+
+    Output
+    ------
+    ranked: torch.Tensor, shape (B, L)
+        The chosen items, in the order picked.
+
+    """
     rel_weight = (2.0 * dataset.user_w_rel[user_ids]).view(-1, 1)
     div_weight = (2.0 * dataset.user_w_div[user_ids]).view(-1, 1)
     L = dataset.L
@@ -32,16 +53,75 @@ def greedy_slate(dataset, user_ids, candidates):
 
 
 def slate_value(dataset, user_ids, ranked):
-    """Expected min-rel reward of each ranked slate."""
+    """Expected min-rel reward of each ranked slate.
+
+    Input
+    ------
+    dataset: SyntheticBanditDataset
+        The environment (min-rel).
+
+    user_ids: torch.Tensor, shape (B, )
+        The users.
+
+    ranked: torch.Tensor, shape (B, L)
+        The ranked items.
+
+    Output
+    ------
+    value: torch.Tensor, shape (B, )
+        The expected reward summed over positions.
+
+    """
     return dataset.reward(user_ids, ranked).sum(1)
 
 
 def minrel_value(dataset, user_ids, candidates):
-    """Expected slate reward of a candidate set after the greedy late stage."""
+    """Expected slate reward of a candidate set after the greedy late stage.
+
+    Input
+    ------
+    dataset: SyntheticBanditDataset
+        The environment (min-rel).
+
+    user_ids: torch.Tensor, shape (B, )
+        The users.
+
+    candidates: torch.Tensor, shape (B, K)
+        Each user's candidate set.
+
+    Output
+    ------
+    value: torch.Tensor, shape (B, )
+        The expected reward of the greedy slate.
+
+    """
     return slate_value(dataset, user_ids, greedy_slate(dataset, user_ids, candidates))
 
 
 def slate_components(dataset, user_ids, ranked):
-    """The two legs of a slate's min-rel reward: summed relevance and the scaled diversity term."""
+    """The two legs of a slate's min-rel reward: summed relevance and the scaled diversity term.
+
+    Both legs are unweighted; the slate reward is 2·w_rel·rel + 2·w_div·div.
+
+    Input
+    ------
+    dataset: SyntheticBanditDataset
+        The environment (min-rel).
+
+    user_ids: torch.Tensor, shape (B, )
+        The users.
+
+    ranked: torch.Tensor, shape (B, L)
+        The ranked items.
+
+    Output
+    ------
+    rel: torch.Tensor, shape (B, )
+        The relevance summed over positions.
+
+    div: torch.Tensor, shape (B, )
+        L · minrel_lambda · diversity(ranked), the diversity leg summed over positions.
+
+    """
     rel = (dataset.action_context[ranked] * dataset.user_context[user_ids].unsqueeze(1)).sum(-1).sum(-1)
     return rel, dataset.L * dataset.minrel_lambda * dataset.diversity(ranked, user_ids)

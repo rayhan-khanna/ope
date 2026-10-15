@@ -8,7 +8,9 @@ Diversity-aware Candidate Retrieval in Two-stage Decisions".
 In a two-stage decision system, an early-stage ranker (ESR) retrieves a candidate set of K items and a late-stage
 ranker (LSR) chooses a ranking of length L from those candidates. Here the ESR is learned online by policy gradient
 from the reward of the final ranking, while the LSR stays fixed. The ESR can represent each user with several
-preference vectors, so a single candidate set can cover several directions of interest.
+preference vectors, so a single candidate set can cover several directions of interest: each vector is a free
+parameter of the user, every vector scores items against one shared learned item embedding table, and each pick of
+the candidate set samples from the softmax of one vector's scores over the items not yet picked.
 
 Two synthetic settings are studied:
 
@@ -23,10 +25,14 @@ Two synthetic settings are studied:
 
 In the latent setting the ESR is trained with the credit-assigned policy gradient (CA-PG) of
 [facebookresearch/early_stage_retrieval](https://github.com/facebookresearch/early_stage_retrieval). CA-PG credits
-each ranked item's probability of entering the candidate set with that item's own reward, instead of crediting the
-joint probability of the whole set with the total reward as vanilla policy gradient does. With CA-PG, an ESR with
-several preference vectors also learns how to split the K slots among them. The min-rel reward is not additive per
-item, so that setting uses vanilla policy gradient, with the preference vectors filling the slots in turn.
+each ranked item's probability of being retrieved with that item's own reward, instead of crediting the joint
+probability of the whole set with the total reward as vanilla policy gradient does. With CA-PG, an ESR with several
+preference vectors also learns how to split the K slots among them. The min-rel reward is not additive per item, so
+that setting uses vanilla policy gradient, with the preference vectors filling the slots in turn. Both estimators use
+the sampling-with-replacement (SwR) approximation of these probabilities: for CA-PG, the probability that one pick
+selects the item, which with several vectors is the allocation-weighted mixture of their softmaxes; for vanilla policy
+gradient, the product over picks of each pick's softmax over all items. The ESR itself always samples candidates
+without replacement.
 
 Two collaborative-filtering (CF) baselines complete the comparison: `naive_cf` regresses logged data offline, and
 `online_cf_eps` learns online, filling 20% of the K slots with random items and the rest with its top-scored items.
@@ -63,11 +69,14 @@ Every command below runs from the repository root with `PYTHONPATH=.`. Runs log 
 
 The command line sets the method, the setting (`--setting latent` or `minrel`), the seed, the candidate budget K
 (`--top_k`), the number of preference vectors P (`--n_pref`, default 5 for `online_multi_pref`), the ranking length L
-(`--ranking_size`), the estimator (`--credit ca` or `joint`; `ca` exists only for the policy-gradient methods in the
-latent setting, where it is the default), the deploy-time budgets (`--eval_k_list`, budgets below L are ignored), the
-min-rel bonus scale (`--minrel_lambda`, default 5.5) and the training length (`--n_epochs`, default 100000, or 20000
-for `naive_cf`); everything else is fixed in the code. The commands below use the training lengths of the reported
-runs, which used seeds 0 to 9.
+(`--ranking_size`), the estimator (`--credit`, see below), the deploy-time budgets (`--eval_k_list`, budgets below L
+are ignored), the min-rel bonus scale (`--minrel_lambda`, default 5.5) and the training length (`--n_epochs`, default
+100000, or 20000 for `naive_cf`); everything else is fixed in the code. The commands below use the training lengths
+of the reported runs, which used seeds 0 to 9.
+
+`--credit` takes `ca_swr`, CA-PG with SwR and the default for the policy-gradient methods in the latent setting;
+`joint`, vanilla policy gradient with SwR and the default otherwise; or `ca`, CA-PG without SwR, kept from earlier
+runs. The two CA-PG options exist only for the policy-gradient methods in the latent setting.
 
 ```
 # latent setting, main arm: P=20 preference vectors, CA-PG with learned slot allocation (100000 epochs)
@@ -126,7 +135,8 @@ different seeds, so their `relative_reward` scales differ slightly; compare the 
 Every run saves `final.pt` and `latest.pt` at the end and `epoch<N>.pt` every 10000 epochs. Policy-gradient runs also
 save `latest.pt` every epoch and `best.pt` on improvement until a collapse; `online_cf_eps` saves `latest.pt` every
 1000 epochs. The metadata of `final.pt` records the epoch at which training stopped. Run names keep the tag layout of
-the reported runs, for example `R10` for L=10 and `v6` or `v5` for the latent or min-rel setting.
+the reported runs, for example `R10` for L=10 and `v6` or `v5` for the latent or min-rel setting; CA-PG runs carry
+`caswr` with SwR and `ca` without it.
 
 ## Reproducibility
 

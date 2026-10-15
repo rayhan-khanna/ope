@@ -16,10 +16,11 @@ def main():
                         help=f"P: preference vectors per user for online_multi_pref (default {DEFAULT_N_PREF})")
     parser.add_argument("--eval_k_list", type=lambda s: [int(k) for k in s.split(",")], default="20,50,100",
                         help="comma-separated deploy-time candidate sizes; sizes below --ranking_size are ignored")
-    parser.add_argument("--credit", default=None, choices=("ca", "joint"),
-                        help="ca: credit-assigned gradient, with learned allocation for online_multi_pref (latent "
-                             "policy-gradient runs only, their default); joint: vanilla gradient, round-robin heads "
-                             "(the default otherwise)")
+    parser.add_argument("--credit", default=None, choices=("ca_swr", "ca", "joint"),
+                        help="ca_swr: credit-assigned gradient under sampling with replacement, with learned "
+                             "allocation for online_multi_pref (latent policy-gradient runs only, their default); ca: "
+                             "the same without the replacement approximation; joint: vanilla gradient under sampling "
+                             "with replacement, round-robin heads (the default otherwise)")
     parser.add_argument("--minrel_lambda", type=float, default=5.5, help="diversity-bonus scale of the min-rel setting")
     parser.add_argument("--n_epochs", type=int, default=None,
                         help=f"default {DEFAULT_EPOCHS}, or {NAIVE_CF_EPOCHS} for naive_cf")
