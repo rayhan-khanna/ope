@@ -15,7 +15,8 @@ from env.synthetic_bandit_dataset import N_MODES
 from env.policy import MultiPreferencePolicy
 from benchmark.late_stage import greedy_slate, minrel_value, slate_value, slate_components
 from benchmark.latent_eval import (latent_value, rank_under_z, search_draws, anchor_values, budget_references,
-                                   SEED_RANDOM, SEED_ORACLE, EVAL_DRAWS)
+                                   random_candidates, EVAL_SEED, SEED_RANDOM, SEED_ORACLE, EVAL_DRAWS,
+                                   BUDGET_SEED_STRIDE)
 
 ITEM_LR, PREF_LR = 0.01, 0.03
 # credit-assigned estimators: ca_swr under sampling with replacement (the default), ca without it (the earlier runs)
@@ -27,7 +28,8 @@ SNAPSHOT_INTERVAL = 10000
 COLLAPSE_FRAC = 0.65
 REWARD_SCALE_BETA = 0.99
 VAL_DRAW_USERS = 10000
-MINREL_ORACLE_USERS = 256
+SWEEP_KEYS = ("val_", "relative_reward_K")  # prefixes of the keys logged only every SWEEP_INTERVAL epochs
+MINREL_ORACLE_CHUNK = 256  # users per chunk of the min-rel oracle, which compares every pair of items
 
 # reference values: scalars at the trained budget, per user type and per other deploy budget, plus constant
 # fields logged with them (the latent oracle's two constructions)
@@ -115,12 +117,11 @@ def deployment_log(dataset, refs, deploy, sweep):
     types = dataset.user_types
     log = {"eval_batch_reward": deploy.reward.mean().item()}
     log_per_type(log, "eval_batch_reward", deploy.reward, types)
-    if refs is not None:
-        log["random_slate_reward"], log["oracle_slate_reward"] = refs.random, refs.oracle
-        log.update(refs.components)
-        log["relative_reward"] = relative(log["eval_batch_reward"], refs.random, refs.oracle)
-        for t, (random_t, oracle_t) in refs.by_type.items():
-            log[f"relative_reward_type{t}"] = relative(log[f"eval_batch_reward_type{t}"], random_t, oracle_t)
+    log["random_slate_reward"], log["oracle_slate_reward"] = refs.random, refs.oracle
+    log.update(refs.components)
+    log["relative_reward"] = relative(log["eval_batch_reward"], refs.random, refs.oracle)
+    for t, (random_t, oracle_t) in refs.by_type.items():
+        log[f"relative_reward_type{t}"] = relative(log[f"eval_batch_reward_type{t}"], random_t, oracle_t)
     if deploy.rel is not None:
         log["eval_batch_rel"], log["eval_batch_div"] = deploy.rel.mean().item(), deploy.div.mean().item()
         log_per_type(log, "eval_batch_rel", deploy.rel, types)
@@ -130,7 +131,7 @@ def deployment_log(dataset, refs, deploy, sweep):
         log_per_type(log, f"cand_{name}", values, types)
     for k, reward_k in sweep.items():
         log[f"val_reward_K{k}"] = reward_k.mean().item()
-        if refs is not None and k in refs.by_budget:
+        if k in refs.by_budget:
             log[f"relative_reward_K{k}"] = relative(log[f"val_reward_K{k}"], *refs.by_budget[k])
         log_per_type(log, f"val_reward_K{k}", reward_k, types)
     return log
@@ -217,6 +218,16 @@ def build_policy(run):
     return policy, optimizer
 
 
+def type_references(dataset, random_value, oracle_value):
+    """Mean (random, oracle) values of each user type present."""
+    by_type = {}
+    for t in range(3):
+        mask = dataset.user_types == t
+        if mask.any():
+            by_type[t] = (random_value[mask].mean().item(), oracle_value[mask].mean().item())
+    return by_type
+
+
 def latent_references(run):
     """Random and oracle values on every user, overall, per type and per deploy budget."""
     dataset = run.dataset
@@ -229,24 +240,37 @@ def latent_references(run):
     print(f"[anchors] K={K}: random={random_ref:.4f} oracle={oracle_ref:.4f} "
           f"(sampled={components['oracle_sampled_reward']:.4f} greedy={components['oracle_greedy_reward']:.4f}; "
           f"{dataset.n_users} users, {EVAL_DRAWS} interest draws)")
-    by_type = {}
-    for t in range(3):
-        mask = dataset.user_types == t
-        if mask.any():
-            by_type[t] = (random_value[mask].mean().item(), oracle_value[mask].mean().item())
     by_budget = budget_references(dataset, [k for k in run.eval_k_list if k != K], rel_draws)
-    return References(random_ref, oracle_ref, by_type, by_budget, components)
+    return References(random_ref, oracle_ref, type_references(dataset, random_value, oracle_value), by_budget,
+                      components)
 
 
-def minrel_references(dataset, random_users, random_candidates, oracle_users):
-    """Random value of uniform candidate sets; oracle value of the greedy slate over all items."""
-    random_ref = minrel_value(dataset, random_users, random_candidates).mean().item()
-    oracle_users = oracle_users[:MINREL_ORACLE_USERS]
-    all_items = torch.arange(dataset.n_items, device=dataset.device).unsqueeze(0).expand(len(oracle_users), -1)
-    oracle_ref = minrel_value(dataset, oracle_users, all_items).mean().item()
-    print(f"[anchors] random {random_ref:.4f} ({len(random_users)} users) "
-          f"oracle {oracle_ref:.4f} (greedy on all items, {len(oracle_users)} users)")
-    return References(random_ref, oracle_ref, {}, {}, {})
+def minrel_references(run):
+    """Random and oracle values on every user, overall, per type and per deploy budget; the oracle, the greedy slate
+    over all items, is the same at every budget."""
+    dataset = run.dataset
+    K = dataset.K
+    user_ids = torch.arange(dataset.n_users, device=dataset.device)
+    all_items = torch.arange(dataset.n_items, device=dataset.device)
+    oracle_value = torch.cat([minrel_value(dataset, users, all_items.expand(len(users), -1))
+                              for users in user_ids.split(MINREL_ORACLE_CHUNK)])
+    random_value = minrel_value(dataset, user_ids, random_candidates(dataset, K, SEED_RANDOM))
+    random_ref, oracle_ref = random_value.mean().item(), oracle_value.mean().item()
+    print(f"[anchors] K={K}: random={random_ref:.4f} oracle={oracle_ref:.4f} "
+          f"(greedy slate over all items; {dataset.n_users} users)")
+    by_budget = {}
+    for k in run.eval_k_list:
+        if k != K:
+            seed = EVAL_SEED + BUDGET_SEED_STRIDE * k
+            by_budget[k] = (minrel_value(dataset, user_ids, random_candidates(dataset, k, seed)).mean().item(),
+                            oracle_ref)
+            print(f"[anchors] K'={k}: random={by_budget[k][0]:.2f} oracle={oracle_ref:.2f}")
+    return References(random_ref, oracle_ref, type_references(dataset, random_value, oracle_value), by_budget, {})
+
+
+def references(run):
+    """The random and oracle references, shared by every method; their draws have seeded generators of their own."""
+    return latent_references(run) if run.dataset.latent else minrel_references(run)
 
 
 @torch.no_grad()
@@ -344,12 +368,11 @@ def train_policy_gradient(run):
     dataset = run.dataset
     K = dataset.K
     policy, optimizer = build_policy(run)
-    # the three reference draws are unused in the latent setting but keep the training stream of the reported runs
-    random_users = dataset.sample_users(dataset.n_users)
-    random_candidates = torch.randint(0, dataset.n_items, (dataset.n_users, K), device=dataset.device)
-    oracle_users = dataset.sample_users(dataset.n_users)
-    refs = (latent_references(run) if dataset.latent
-            else minrel_references(dataset, random_users, random_candidates, oracle_users))
+    # the old min-rel reference draws, unused but kept so seeds reproduce the reported runs' training stream
+    dataset.sample_users(dataset.n_users)
+    torch.randint(0, dataset.n_items, (dataset.n_users, K), device=dataset.device)
+    dataset.sample_users(dataset.n_users)
+    refs = references(run)
     dataset.sample_users(VAL_DRAW_USERS)  # the old validation batch draw, kept so seeds reproduce the reported runs
 
     reward_scale = RewardScale(dataset.device)
@@ -378,7 +401,7 @@ def train_policy_gradient(run):
         collapsed = best_reward > 0 and eval_reward < COLLAPSE_FRAC * best_reward
         log["collapsed"] = float(collapsed)
         if sweep:
-            last_sweep = {k: v for k, v in log.items() if k.startswith("val_")}
+            last_sweep = {k: v for k, v in log.items() if k.startswith(SWEEP_KEYS)}
         wandb.log(log)
         print(f"[Epoch {epoch}] Method: {run.method} | Loss: {log['loss_policy']:.4f} "
               f"| AvgReward(batch): {log['batch_reward']:.4f} | Top1: {log['early_stage_top1_action_prob']:.4f}")
@@ -389,5 +412,9 @@ def train_policy_gradient(run):
         elif collapsed:
             print(f"  !! collapse: eval reward {eval_reward:.4f} < {COLLAPSE_FRAC:.0%} of best {best_reward:.4f}; "
                   f"training stops and these metrics are carried forward so the seed still counts")
-            frozen_log = {k: v for k, v in log.items() if not k.startswith("val_")}
+            if not sweep_epoch:  # carry the collapsed policy's budget sweep, not the last one before the collapse
+                sweep = {k: deploy.reward if k == K else evaluate(dataset, policy, k).reward for k in run.eval_k_list}
+                last_sweep = {k: v for k, v in deployment_log(dataset, refs, deploy, sweep).items()
+                              if k.startswith(SWEEP_KEYS)}
+            frozen_log = {k: v for k, v in log.items() if not k.startswith(SWEEP_KEYS)}
     run.save(run.bundle("first_stage", policy, trained_epochs), "final.pt", "latest.pt")

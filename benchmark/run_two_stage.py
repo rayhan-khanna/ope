@@ -1,7 +1,7 @@
 """Command line for one training run; run from the repository root with PYTHONPATH=. (see README)."""
 import argparse
 
-from benchmark.rl_two_stage_train import train, DEFAULT_EPOCHS, NAIVE_CF_EPOCHS, DEFAULT_N_PREF
+from benchmark.rl_two_stage_train import train, DEFAULT_EPOCHS, NAIVE_CF_EPOCHS, DEFAULT_N_PREF, CF_EPS
 
 
 def main():
@@ -22,6 +22,8 @@ def main():
                              "the same without the replacement approximation; joint: vanilla gradient under sampling "
                              "with replacement, round-robin heads (the default otherwise)")
     parser.add_argument("--minrel_lambda", type=float, default=5.5, help="diversity-bonus scale of the min-rel setting")
+    parser.add_argument("--cf_eps", type=float, default=CF_EPS,
+                        help="online_cf_eps: the fraction of the K candidates drawn at random")
     parser.add_argument("--n_epochs", type=int, default=None,
                         help=f"default {DEFAULT_EPOCHS}, or {NAIVE_CF_EPOCHS} for naive_cf")
     train(**vars(parser.parse_args()))

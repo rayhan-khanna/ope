@@ -19,7 +19,7 @@ DEFAULT_EPOCHS = 100_000
 NAIVE_CF_EPOCHS = 20_000
 DEFAULT_N_PREF = 5
 LOGIT_TEMP = {"latent": 1.0, "minrel": 0.5}
-WANDB_PROJECT = "two_stage_bandit"
+WANDB_PROJECT = "diversity-aware-candidate-retrieval"
 WANDB_GROUP_MAX = 127
 RUN_TAG = f"het_d{HET_DELTA:g}_hsingle_unified_mog{N_MODES}s{ITEM_STD:g}"
 
@@ -29,7 +29,7 @@ def emb_names(pg):
     return ("multi_user_emb", "muemb") if pg else ("learned_user_learned_item", "lrulri")
 
 
-def run_names(method, latent, credit, alloc, K, L, P, seed, logit_temp, minrel_lambda, stamp):
+def run_names(method, latent, credit, alloc, K, L, P, seed, logit_temp, minrel_lambda, cf_eps, stamp):
     """wandb run and group names; the tag layout keys the logged experiments and must not change, so the
     ranking length L is still written as R."""
     pg = method in PG_METHODS
@@ -44,7 +44,7 @@ def run_names(method, latent, credit, alloc, K, L, P, seed, logit_temp, minrel_l
     if pg and logit_temp != 1.0:
         tag += f"_lt{logit_temp:g}"
     if method == "online_cf_eps":
-        tag += f"_eps{CF_EPS:g}_trel"
+        tag += f"_eps{cf_eps:g}_trel"
     reward_str = f"rmodehet_d{HET_DELTA:g}_ts{HET_THETA_SCALE:g}"
     emb_tag = emb_names(pg)[1]
     lr_tag = f"_lr{ITEM_LR:g}-{PREF_LR:g}" if pg else ""
@@ -68,6 +68,7 @@ class Run:
     eval_k_list: list
     run_dir: str
     meta: dict
+    cf_eps: float = CF_EPS
 
     def bundle(self, key, module, epoch):
         """Checkpoint contents: the trained model and the environment's ground truth.
@@ -110,7 +111,8 @@ class Run:
             os.replace(tmp, path)
 
 
-def train(method, seed, setting, credit, top_k, ranking_size, n_pref, eval_k_list, minrel_lambda, n_epochs):
+def train(method, seed, setting, credit, top_k, ranking_size, n_pref, eval_k_list, minrel_lambda, n_epochs,
+          cf_eps=CF_EPS):
     """Resolve one run's configuration, build its dataset and train it."""
     latent = setting == "latent"
     pg = method in PG_METHODS
@@ -138,7 +140,7 @@ def train(method, seed, setting, credit, top_k, ranking_size, n_pref, eval_k_lis
         P = 1 if method == "online_single_pref" else 0
 
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
-    name, group = run_names(method, latent, credit, alloc, K, L, P, seed, logit_temp, minrel_lambda, stamp)
+    name, group = run_names(method, latent, credit, alloc, K, L, P, seed, logit_temp, minrel_lambda, cf_eps, stamp)
     run_dir = os.path.join("checkpoints", name)
     os.makedirs(run_dir, exist_ok=True)
     print(f"[setup] {method} setting={setting} K={K} L={L} P={P} credit={credit} alloc={alloc} seed={seed} "
@@ -149,13 +151,13 @@ def train(method, seed, setting, credit, top_k, ranking_size, n_pref, eval_k_lis
             "top_k": K, "temperature": LOGGING_TEMP, "P": P, "emb_dim": dataset.action_context.shape[1],
             "run_tag": RUN_TAG, "credit": credit, "alloc": alloc, "emb_mode": emb_mode, "emb_tag": emb_tag,
             "reward_mode": "heterogeneous", "het_delta": HET_DELTA, "het_theta_scale": HET_THETA_SCALE,
-            "cf_eps": CF_EPS, "reward_noise_std": REWARD_STD, "minrel_reward": not latent,
+            "cf_eps": cf_eps, "reward_noise_std": REWARD_STD, "minrel_reward": not latent,
             "minrel_lambda": minrel_lambda, "logit_temp": logit_temp, "minrel_relu": not latent, "run_dir": run_dir}
     if pg:
         meta.update(item_lr_learned=ITEM_LR, pref_lr_learned=PREF_LR)
     wandb.init(project=WANDB_PROJECT, name=name, group=group, settings=wandb.Settings(init_timeout=300), config=meta)
     run = Run(dataset=dataset, method=method, credit=credit, alloc=alloc, P=P, logit_temp=logit_temp,
-              n_epochs=n_epochs, eval_k_list=eval_k_list, run_dir=run_dir, meta=meta)
+              n_epochs=n_epochs, eval_k_list=eval_k_list, run_dir=run_dir, meta=meta, cf_eps=cf_eps)
     if method == "naive_cf":
         train_naive_cf(run, feedback)
     elif method == "online_cf_eps":

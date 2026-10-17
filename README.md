@@ -35,7 +35,8 @@ gradient, the product over picks of each pick's softmax over all items. The ESR 
 without replacement.
 
 Two collaborative-filtering (CF) baselines complete the comparison: `naive_cf` regresses logged data offline, and
-`online_cf_eps` learns online, filling 20% of the K slots with random items and the rest with its top-scored items.
+`online_cf_eps` learns online, filling a fraction ε of the K slots with random items and the rest with its top-scored
+items.
 In the latent setting they regress the observed reward of each ranked item; in min-rel they regress item relevance,
 so they cannot learn the diversity bonus.
 
@@ -63,16 +64,16 @@ wandb login
 ```
 
 Every command below runs from the repository root with `PYTHONPATH=.`. Runs log to the wandb project
-`two_stage_bandit` and save checkpoints under `checkpoints/<run name>/`.
+`diversity-aware-candidate-retrieval` and save checkpoints under `checkpoints/<run name>/`.
 
 ## Training
 
 The command line sets the method, the setting (`--setting latent` or `minrel`), the seed, the candidate budget K
 (`--top_k`), the number of preference vectors P (`--n_pref`, default 5 for `online_multi_pref`), the ranking length L
 (`--ranking_size`), the estimator (`--credit`, see below), the deploy-time budgets (`--eval_k_list`, budgets below L
-are ignored), the min-rel bonus scale (`--minrel_lambda`, default 5.5) and the training length (`--n_epochs`, default
-100000, or 20000 for `naive_cf`); everything else is fixed in the code. The commands below use the training lengths
-of the reported runs, which used seeds 0 to 9.
+are ignored), the min-rel bonus scale (`--minrel_lambda`, default 5.5), the exploration rate ε of `online_cf_eps`
+(`--cf_eps`, default 0.2) and the training length (`--n_epochs`, default 100000, or 20000 for `naive_cf`); everything
+else is fixed in the code. The commands below use the training lengths of the reported runs, which used seeds 0 to 9.
 
 `--credit` takes `ca_swr`, CA-PG with SwR and the default for the policy-gradient methods in the latent setting;
 `joint`, vanilla policy gradient with SwR and the default otherwise; or `ca`, CA-PG without SwR, kept from earlier
@@ -112,10 +113,10 @@ min-rel.
 
 * `eval_batch_reward`: reward of the ranking after greedy retrieval for all users, every epoch (every 50 for
   `naive_cf`);
-* `relative_reward`: the same rescaled so that random retrieval is 0 and the oracle candidate set is 1 (per type for
-  policy-gradient runs in the latent setting; absent for the CF baselines in min-rel);
+* `relative_reward`: the same rescaled so that random retrieval is 0 and the oracle candidate set is 1 (in min-rel,
+  the oracle is the LSR's greedy ranking over all items);
 * `val_reward_K{k}`: the reward at each budget in `--eval_k_list`, every ten epochs (every 50 for `naive_cf`), with
-  `relative_reward_K{k}`, overall only, for the budgets other than K in the latent setting;
+  `relative_reward_K{k}`, overall only, for the budgets other than K;
 * `cand_*`: diversity of the retrieved candidate sets (item clusters covered, plus the interest mass they cover in the
   latent setting or their pairwise dissimilarity in min-rel);
 * `eval_batch_rel`, `eval_batch_div`: the relevance and diversity terms of the min-rel reward;
@@ -125,10 +126,9 @@ min-rel.
   stops and the last record is repeated for the remaining epochs so the seed still counts in group means.
 
 Other keys, overall only: `batch_reward` (training or behaviour reward), `loss_policy` or `cf_mse`, and the references
-`random_slate_reward` and `oracle_slate_reward` (absent for the CF baselines in min-rel). Policy-gradient runs in the
-latent setting also log `oracle_sampled_reward` and `oracle_greedy_reward`, the two oracle constructions whose
-per-user maximum is the oracle reference. At the trained K, policy-gradient and CF runs draw their references with
-different seeds, so their `relative_reward` scales differ slightly; compare the two on `eval_batch_reward`.
+`random_slate_reward` and `oracle_slate_reward`, which do not depend on the method. Runs in the latent setting also log
+`oracle_sampled_reward` and `oracle_greedy_reward`, the two oracle constructions whose per-user maximum is the oracle
+reference.
 
 ## Checkpoints
 
